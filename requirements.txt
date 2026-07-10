@@ -1,2 +1,5 @@
 fastapi==0.115.*
 uvicorn[standard]==0.34.*
+google-genai==1.*
+google-cloud-firestore==2.*
+pydantic==2.*
