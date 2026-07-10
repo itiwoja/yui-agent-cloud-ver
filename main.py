@@ -6,13 +6,14 @@ MVP パイプライン:
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+from autonomous_review import run_autonomous_review
 from chat import chat_turn
 from extraction import extract_tasks
 from memory_store import get_recent_titles, record_and_resolve
 
 app = FastAPI(title="Yui Cloud Agent")
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 
 
 @app.get("/health")
@@ -49,3 +50,9 @@ def chat(request: ChatRequest) -> dict:
         for task in result.tasks
     ]
     return {"reply": result.reply, "tasks": resolved}
+
+
+@app.post("/autonomous-review")
+def autonomous_review() -> dict:
+    """Cloud Scheduler から定期的に叩かれ、ユーザーの指示なしに放置タスクを見直す。"""
+    return run_autonomous_review()
