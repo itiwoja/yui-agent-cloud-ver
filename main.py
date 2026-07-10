@@ -6,12 +6,13 @@ MVP パイプライン:
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+from chat import chat_turn
 from extraction import extract_tasks
 from memory_store import get_recent_titles, record_and_resolve
 
 app = FastAPI(title="Yui Cloud Agent")
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 
 
 @app.get("/health")
@@ -32,3 +33,19 @@ def process(request: UtteranceRequest) -> dict:
         for task in extracted.tasks
     ]
     return {"tasks": resolved}
+
+
+class ChatRequest(BaseModel):
+    session_id: str
+    message: str
+
+
+@app.post("/chat")
+def chat(request: ChatRequest) -> dict:
+    known_titles = get_recent_titles()
+    result = chat_turn(request.session_id, request.message, known_titles)
+    resolved = [
+        record_and_resolve(task.title, task.priority, task.reason)
+        for task in result.tasks
+    ]
+    return {"reply": result.reply, "tasks": resolved}

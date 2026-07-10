@@ -1,0 +1,86 @@
+"""複数ターンの会話をFirestoreに保持しつつ、Geminiで会話応答とタスク抽出を同時に行う。"""
+import os
+from datetime import datetime, timezone
+
+from google import genai
+from google.genai import types
+from google.cloud import firestore
+from pydantic import BaseModel, Field
+
+from extraction import ExtractedTask
+
+PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "yui-agent-2026")
+LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "asia-northeast1")
+MODEL = "gemini-2.5-flash"
+CONVERSATIONS_COLLECTION = "conversations"
+HISTORY_LIMIT = 20
+
+CHAT_SYSTEM_INSTRUCTION = """あなたは「ゆい」という名前の対話型AI秘書です。ユーザーの雑談・相談・思いつきに、
+親しみやすく簡潔な口語で応答してください。応答の中で、ユーザーが言及した実行すべきタスクがあれば
+静かに拾い上げ、tasksフィールドに構造化して返してください（雑談だけでタスクが無ければ空配列でよい）。
+「既存タスク一覧」に同じ用件があれば、titleはその表記をそのまま使ってください。
+タスクを見つけたことをreplyの中でわざとらしく宣言する必要はありません、自然な会話の流れで触れる程度にしてください。"""
+
+
+class ChatResult(BaseModel):
+    reply: str = Field(description="ゆいとしてユーザーへ返す会話的な応答文")
+    tasks: list[ExtractedTask] = Field(default_factory=list)
+
+
+def _client() -> genai.Client:
+    return genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
+
+
+def _db() -> firestore.Client:
+    return firestore.Client(project=PROJECT_ID)
+
+
+def _history_ref(session_id: str):
+    return _db().collection(CONVERSATIONS_COLLECTION).document(session_id).collection("messages")
+
+
+def get_history(session_id: str, limit: int = HISTORY_LIMIT) -> list[dict]:
+    docs = (
+        _history_ref(session_id)
+        .order_by("created_at", direction=firestore.Query.ASCENDING)
+        .limit_to_last(limit)
+        .get()
+    )
+    return [doc.to_dict() for doc in docs]
+
+
+def _append_message(session_id: str, role: str, text: str) -> None:
+    _history_ref(session_id).add(
+        {"role": role, "text": text, "created_at": datetime.now(timezone.utc)}
+    )
+
+
+def chat_turn(session_id: str, user_text: str, known_titles: list[str]) -> ChatResult:
+    history = get_history(session_id)
+
+    contents = [
+        types.Content(role=msg["role"], parts=[types.Part(text=msg["text"])])
+        for msg in history
+    ]
+
+    titles_block = "\n".join(f"- {t}" for t in known_titles) if known_titles else "（なし）"
+    user_message = f"既存タスク一覧:\n{titles_block}\n\n発言:\n{user_text}"
+    contents.append(types.Content(role="user", parts=[types.Part(text=user_message)]))
+
+    client = _client()
+    response = client.models.generate_content(
+        model=MODEL,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=CHAT_SYSTEM_INSTRUCTION,
+            temperature=0.4,
+            response_mime_type="application/json",
+            response_schema=ChatResult,
+        ),
+    )
+    result = ChatResult.model_validate_json(response.text)
+
+    _append_message(session_id, "user", user_text)
+    _append_message(session_id, "model", result.reply)
+
+    return result
