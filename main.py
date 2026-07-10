@@ -10,10 +10,11 @@ from autonomous_review import run_autonomous_review
 from chat import chat_turn
 from extraction import extract_tasks
 from memory_store import get_recent_titles, record_and_resolve
+from tasks_client import upsert_task
 
 app = FastAPI(title="Yui Cloud Agent")
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 
 
 @app.get("/health")
@@ -33,6 +34,8 @@ def process(request: UtteranceRequest) -> dict:
         record_and_resolve(task.title, task.priority, task.reason)
         for task in extracted.tasks
     ]
+    for task in resolved:
+        upsert_task(task["title"], task["priority"], task["reason"])
     return {"tasks": resolved}
 
 
@@ -49,6 +52,8 @@ def chat(request: ChatRequest) -> dict:
         record_and_resolve(task.title, task.priority, task.reason)
         for task in result.tasks
     ]
+    for task in resolved:
+        upsert_task(task["title"], task["priority"], task["reason"])
     return {"reply": result.reply, "tasks": resolved}
 
 

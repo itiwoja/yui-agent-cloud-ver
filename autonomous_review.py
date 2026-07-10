@@ -9,6 +9,8 @@ from google import genai
 from google.genai import types
 from google.cloud import firestore
 
+from tasks_client import upsert_task
+
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "yui-agent-2026")
 LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "asia-northeast1")
 MODEL = "gemini-2.5-flash"
@@ -62,6 +64,7 @@ def run_autonomous_review() -> dict:
 
         old_priority = data.get("priority", 1)
         new_priority = min(MAX_PRIORITY, old_priority + 1)
+        reason = data.get("reason", "")
         update = {
             "priority": new_priority,
             "escalated_by_system": True,
@@ -69,11 +72,13 @@ def run_autonomous_review() -> dict:
         }
 
         if new_priority >= RESEARCH_PRIORITY_THRESHOLD:
-            note = _research(data["title"], data.get("reason", ""))
+            note = _research(data["title"], reason)
             update["research_note"] = note
+            reason = f"{reason}\n\n[ゆいが自動で裏どり] {note}"
             researched.append({"title": data["title"], "research_note": note})
 
         doc.reference.update(update)
+        upsert_task(data["title"], new_priority, reason)
         escalated.append(
             {"title": data["title"], "old_priority": old_priority, "new_priority": new_priority}
         )
