@@ -109,6 +109,7 @@
   <header>
     <h1>Yui</h1>
     <span>入力されなかったタスクを発見する対話エージェント</span>
+    <button id="mute" type="button" style="margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--sub);border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer;">🔊 音声ON</button>
   </header>
   <div id="log"></div>
   <form id="form">
@@ -121,6 +122,36 @@ const log = document.getElementById('log');
 const form = document.getElementById('form');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
+
+const muteBtn = document.getElementById('mute');
+let muted = localStorage.getItem('yui_muted') === '1';
+function updateMuteBtn() {
+  muteBtn.textContent = muted ? '🔇 音声OFF' : '🔊 音声ON';
+}
+updateMuteBtn();
+muteBtn.addEventListener('click', () => {
+  muted = !muted;
+  localStorage.setItem('yui_muted', muted ? '1' : '0');
+  updateMuteBtn();
+});
+
+async function speak(text) {
+  if (muted || !text) return;
+  try {
+    const res = await fetch('/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    if (!res.ok) return;
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audio.play().catch(() => {});
+  } catch (err) {
+    // 音声再生の失敗はチャット自体を止めない
+  }
+}
 
 const sessionId = (() => {
   const key = 'yui_session_id';
@@ -186,6 +217,7 @@ form.addEventListener('submit', async (e) => {
       addRow('yui', 'エラーが発生しました。もう一度試してください。');
     } else {
       addRow('yui', data.reply, data.tasks);
+      speak(data.reply);
     }
   } catch (err) {
     typing.remove();
