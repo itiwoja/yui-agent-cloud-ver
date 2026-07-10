@@ -78,6 +78,7 @@ def record_and_resolve(title: str, priority: int, reason: str) -> dict:
             "mention_count": 1,
             "first_mentioned_at": now,
             "last_mentioned_at": now,
+            "status": "open",
         }
     )
 

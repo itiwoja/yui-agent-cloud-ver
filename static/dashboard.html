@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Yui — ダッシュボード</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #262b36;
+    --text: #e7e9ee;
+    --sub: #8b93a7;
+    --accent: #6ea8ff;
+    --ask: #f0b429;
+    --progress: #c99bff;
+    --done: #4fd18b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Hiragino Sans", "Yu Gothic UI", "Segoe UI", sans-serif;
+    min-height: 100vh;
+  }
+  header {
+    padding: 20px 28px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+  }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: 0.04em; }
+  header a { color: var(--sub); font-size: 13px; text-decoration: none; margin-left: auto; }
+  header a:hover { color: var(--accent); }
+
+  main {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+  }
+  section h2 {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--sub);
+    text-transform: uppercase;
+    margin: 0 0 12px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 18px;
+    margin-bottom: 10px;
+  }
+  .card-top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  .card-title { font-weight: 600; font-size: 14.5px; }
+  .card-note { font-size: 13px; color: var(--sub); line-height: 1.6; white-space: pre-wrap; margin-top: 6px; }
+  .badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--sub);
+  }
+  .card.ask { border-color: var(--ask); }
+  .card.ask .card-note { color: var(--ask); }
+  .card.progress { border-color: var(--progress); }
+
+  .answer-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .answer-row input {
+    flex: 1;
+    background: #12141a;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    color: var(--text);
+    font-size: 13px;
+  }
+  .answer-row button {
+    background: var(--accent);
+    color: #0b0e14;
+    border: none;
+    border-radius: 8px;
+    padding: 0 14px;
+    font-weight: 700;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .empty { color: var(--sub); font-size: 13px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>YUI DASHBOARD</h1>
+    <a href="/">← 対話に戻る</a>
+  </header>
+  <main>
+    <section id="ask-section">
+      <h2>ゆいから質問があります</h2>
+      <div id="ask-list"></div>
+    </section>
+    <section id="progress-section">
+      <h2>ゆいが進めています</h2>
+      <div id="progress-list"></div>
+    </section>
+    <section id="open-section">
+      <h2>未着手</h2>
+      <div id="open-list"></div>
+    </section>
+  </main>
+
+<script>
+const priorityLabel = ['', '⚪', '🟢', '🟡', '🟠', '🔴'];
+
+function card(task, extraClass) {
+  const div = document.createElement('div');
+  div.className = 'card' + (extraClass ? ' ' + extraClass : '');
+
+  const top = document.createElement('div');
+  top.className = 'card-top';
+  const badge = document.createElement('span');
+  badge.className = 'badge';
+  badge.textContent = `${priorityLabel[task.priority] || ''} 言及${task.mention_count}回`;
+  const title = document.createElement('span');
+  title.className = 'card-title';
+  title.textContent = task.title;
+  top.appendChild(title);
+  top.appendChild(badge);
+  div.appendChild(top);
+
+  if (task.pending_question) {
+    const q = document.createElement('div');
+    q.className = 'card-note';
+    q.textContent = '❓ ' + task.pending_question;
+    div.appendChild(q);
+
+    const row = document.createElement('div');
+    row.className = 'answer-row';
+    const input = document.createElement('input');
+    input.placeholder = '答えを入力…';
+    const btn = document.createElement('button');
+    btn.textContent = '送信';
+    btn.addEventListener('click', async () => {
+      if (!input.value.trim()) return;
+      btn.disabled = true;
+      await fetch(`/tasks/${task.id}/answer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ answer: input.value.trim() }),
+      });
+      load();
+    });
+    row.appendChild(input);
+    row.appendChild(btn);
+    div.appendChild(row);
+  } else if (task.agent_notes) {
+    const note = document.createElement('div');
+    note.className = 'card-note';
+    note.textContent = task.agent_notes;
+    div.appendChild(note);
+  }
+
+  return div;
+}
+
+function hasUnsavedInput() {
+  return Array.from(document.querySelectorAll('.answer-row input'))
+    .some((el) => el.value.trim().length > 0);
+}
+
+async function load() {
+  if (hasUnsavedInput()) return; // 回答入力中は再描画で消さない
+
+  const res = await fetch('/tasks');
+  const data = await res.json();
+  const tasks = data.tasks || [];
+
+  const askList = document.getElementById('ask-list');
+  const progressList = document.getElementById('progress-list');
+  const openList = document.getElementById('open-list');
+  askList.innerHTML = '';
+  progressList.innerHTML = '';
+  openList.innerHTML = '';
+
+  const asks = tasks.filter((t) => t.status === 'needs_input');
+  const progressing = tasks.filter((t) => t.status === 'in_progress');
+  const open = tasks.filter((t) => t.status === 'open' || !t.status);
+
+  if (!asks.length) askList.innerHTML = '<div class="empty">今のところありません</div>';
+  asks.forEach((t) => askList.appendChild(card(t, 'ask')));
+
+  if (!progressing.length) progressList.innerHTML = '<div class="empty">今のところありません</div>';
+  progressing.forEach((t) => progressList.appendChild(card(t, 'progress')));
+
+  if (!open.length) openList.innerHTML = '<div class="empty">今のところありません</div>';
+  open.forEach((t) => openList.appendChild(card(t)));
+}
+
+load();
+setInterval(load, 15000);
+</script>
+</body>
+</html>

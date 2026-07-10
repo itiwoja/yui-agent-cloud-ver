@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from agent_loop import answer_question, list_tasks, run_agent_loop
 from autonomous_review import run_autonomous_review
 from chat import chat_turn
 from extraction import extract_tasks
@@ -17,7 +18,7 @@ from tts import synthesize_speech
 
 app = FastAPI(title="Yui Cloud Agent")
 
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.7.0"
 
 
 @app.get("/health")
@@ -81,7 +82,25 @@ async def transcribe(request: Request) -> dict:
 @app.post("/autonomous-review")
 def autonomous_review() -> dict:
     """Cloud Scheduler から定期的に叩かれ、ユーザーの指示なしに放置タスクを見直す。"""
-    return run_autonomous_review()
+    review_result = run_autonomous_review()
+    agent_result = run_agent_loop()
+    return {**review_result, **agent_result}
+
+
+@app.get("/tasks")
+def get_tasks() -> dict:
+    """ダッシュボード用: 全タスクの状態一覧。"""
+    return {"tasks": list_tasks()}
+
+
+class AnswerRequest(BaseModel):
+    answer: str
+
+
+@app.post("/tasks/{doc_id}/answer")
+def post_answer(doc_id: str, request: AnswerRequest) -> dict:
+    """ゆいからの質問にユーザーが回答し、タスクを前進させる。"""
+    return answer_question(doc_id, request.answer)
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

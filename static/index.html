@@ -70,9 +70,19 @@
   }
   #toggle.on { border-color: var(--captured); color: var(--captured); }
   #toggle:disabled { opacity: 0.5; cursor: default; }
+  #dashLink {
+    position: fixed;
+    top: 20px;
+    left: 20px;
+    color: var(--sub);
+    font-size: 13px;
+    text-decoration: none;
+  }
+  #dashLink:hover { color: var(--accent); }
 </style>
 </head>
 <body>
+  <a id="dashLink" href="/dashboard.html">ダッシュボード →</a>
   <h1>YUI</h1>
   <button id="toggle" type="button">そばに置く</button>
   <div id="orb">🎧</div>
