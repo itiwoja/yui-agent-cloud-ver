@@ -30,6 +30,19 @@ def _thinking_budget() -> int:
     return budget if budget >= 0 else -1
 
 
+def _stream_thinking_budget() -> int:
+    """ストリーミング返答用の思考トークン上限（既定0=無効）。
+
+    思考トークンは最初の出力トークンより前に生成されるため、ストリーミング
+    経路では体感遅延に直結する（実測で first_sentence が +2〜3秒）。
+    """
+    try:
+        budget = int(os.environ.get("YUI_STREAM_THINKING_BUDGET", "0"))
+    except ValueError:
+        return 0
+    return budget if budget >= 0 else -1
+
+
 def _history_limit() -> int:
     """会話履歴の取得件数を環境変数から安全に取得する。"""
     try:
@@ -290,7 +303,9 @@ JSONやtasks・replyといったフィールド名・構造は一切書かない
                 + stream_only_instruction
             ),
             temperature=0.4,
-            thinking_config=types.ThinkingConfig(thinking_budget=_thinking_budget()),
+            # 思考は最初のトークンより前に走るため、ストリーミング返答では
+            # 体感遅延に直結する（実測で first_sentence が+2〜3秒）。既定は無効。
+            thinking_config=types.ThinkingConfig(thinking_budget=_stream_thinking_budget()),
         ),
     )
     for chunk in response:
