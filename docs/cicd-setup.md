@@ -102,9 +102,45 @@ gcloud run services describe yui-agent \
 
 `main` または `master` に小さな変更をpushし、pushイベントでも同じworkflowが起動することを確認する。
 
+## 4.5. アプリトークン（未認証公開エンドポイントの保護）★必須
+
+`--allow-unauthenticated` のままだと、URLを知った第三者が `/chat` `/process`
+`/autonomous-review` を叩いて**本人のGoogle Tasksにタスクを捏造**したり、
+**Geminiを無制限に消費（コストDoS）**できてしまう。`auth.py` がアプリ層で
+`X-Yui-Token` ヘッダ（またはリンク用 `?token=`）を要求してこれを塞ぐ。
+
+`deploy.yml` は `--set-secrets=YUI_APP_TOKEN=yui-app-token:latest` でこの
+トークンを注入する。**このシークレットが無いとデプロイは失敗する**（＝穴が
+開いたまま無自覚にデプロイされるより安全＝fail closed）。次を一度だけ実行する。
+
+```bash
+# 十分に長いランダムトークンを生成して Secret Manager に保存
+python -c "import secrets; print(secrets.token_urlsafe(32))" > yui-app-token.txt
+gcloud secrets create yui-app-token \
+  --project=yui-agent-2026 \
+  --data-file=yui-app-token.txt
+rm yui-app-token.txt
+
+# Cloud Run 実行サービスアカウントにこのシークレットの参照権限を付与
+export RUNTIME_SA="$(gcloud run services describe yui-agent \
+  --region=asia-northeast1 --project=yui-agent-2026 \
+  --format='value(spec.template.spec.serviceAccountName)')"
+gcloud secrets add-iam-policy-binding yui-app-token \
+  --project=yui-agent-2026 \
+  --member="serviceAccount:${RUNTIME_SA}" \
+  --role="roles/secretmanager.secretAccessor"
+```
+
+デモや日常利用は、生成したトークンを付けた `https://<service-url>/?token=<トークン>`
+で開く。ページが `sessionStorage` に保持し、以後のAPI呼び出しに自動で付与する。
+`YUI_APP_TOKEN` が未設定のローカル開発（`uvicorn main:app --reload`）では素通しになる。
+
 ## 5. Cloud Schedulerの再現
 
-Scheduler専用サービスアカウントから認証付きで `/autonomous-review` を30分ごとに呼ぶ。既に同名ジョブがある場合は `create` ではなく `gcloud scheduler jobs update http` を使う。
+Scheduler専用サービスアカウントから `/autonomous-review` を30分ごとに呼ぶ。
+`--allow-unauthenticated` のためアプリ層のトークンで保護しており、Schedulerには
+`X-Yui-Token` ヘッダを付与する（`§4.5` で作成したトークン値を使う）。既に同名
+ジョブがある場合は `create` ではなく `gcloud scheduler jobs update http` を使う。
 
 ```bash
 export SCHEDULER_SA_NAME=yui-scheduler
@@ -123,19 +159,26 @@ gcloud run services add-iam-policy-binding yui-agent \
   --member="serviceAccount:${SCHEDULER_SA}" \
   --role="roles/run.invoker"
 
+export YUI_APP_TOKEN="$(gcloud secrets versions access latest \
+  --secret=yui-app-token --project="${PROJECT_ID}")"
+
 gcloud scheduler jobs create http yui-autonomous-review \
   --location="${REGION}" \
   --schedule="*/30 * * * *" \
   --time-zone="Asia/Tokyo" \
   --uri="${SERVICE_URL}/autonomous-review" \
   --http-method=POST \
+  --headers="X-Yui-Token=${YUI_APP_TOKEN}" \
   --oidc-service-account-email="${SCHEDULER_SA}" \
   --oidc-token-audience="${SERVICE_URL}"
 
 gcloud scheduler jobs run yui-autonomous-review --location="${REGION}"
 ```
 
-現在のworkflowは既存運用との互換性のため `--allow-unauthenticated` を指定している。SchedulerはOIDCを使うため、他の公開エンドポイントへの影響を確認できた段階でCloud Run全体の未認証アクセスを外すことを推奨する。
+`--allow-unauthenticated` はデモの「URLを開いて話す」を成立させるために残している。
+アプリ層の `X-Yui-Token`（`§4.5`）が保護を担うため、Schedulerにはヘッダを付与する。
+将来、UIにもGoogleログイン（IAP）を敷けるなら、OIDC＋未認証アクセス撤廃へ移行して
+アプリトークンを外すのが理想。
 
 ## 6. CalendarスコープのOAuth再同意
 

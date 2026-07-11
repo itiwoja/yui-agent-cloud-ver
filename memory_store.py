@@ -4,10 +4,11 @@ from datetime import datetime, timezone
 
 from google.cloud import firestore
 
+from priority import promote
+
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "yui-agent-2026")
 COLLECTION = "task_mentions"
 PROMOTION_STEP = 1
-MAX_PRIORITY = 5
 
 
 def _client() -> firestore.Client:
@@ -67,6 +68,17 @@ def complete_task(doc_id: str) -> dict:
     }
 
 
+def delete_task(doc_id: str) -> dict:
+    """Firestore上のタスクを物理削除する（誤って拾われたタスクの取り消し）。"""
+    ref = _client().collection(COLLECTION).document(doc_id)
+    snapshot = ref.get()
+    if not snapshot.exists:
+        return {"error": "task not found"}
+    title = snapshot.to_dict().get("title", "")
+    ref.delete()
+    return {"id": doc_id, "title": title, "status": "dismissed"}
+
+
 def record_and_resolve(title: str, priority: int, reason: str) -> dict:
     """タスク言及を記録し、過去に同じタスクの言及があれば優先度を昇格して返す。"""
     db = _client()
@@ -85,12 +97,15 @@ def record_and_resolve(title: str, priority: int, reason: str) -> dict:
         doc = previous[0]
         data = doc.to_dict()
         mention_count = data.get("mention_count", 1) + 1
-        promoted_priority = min(MAX_PRIORITY, data.get("priority", priority) + PROMOTION_STEP)
-        was_promoted = promoted_priority > priority
+        previous_priority = data.get("priority", priority)
+        # 再言及はユーザー由来なので上限は MAX（🔴 まで許す）。新規抽出側が
+        # より高い優先度を付けていればそれも尊重する。
+        new_priority = max(promote(previous_priority, PROMOTION_STEP), priority)
+        was_promoted = new_priority > priority
 
         doc.reference.update(
             {
-                "priority": max(promoted_priority, priority),
+                "priority": new_priority,
                 "reason": reason,
                 "mention_count": mention_count,
                 "last_mentioned_at": now,
@@ -99,11 +114,11 @@ def record_and_resolve(title: str, priority: int, reason: str) -> dict:
 
         return {
             "title": title,
-            "priority": max(promoted_priority, priority),
+            "priority": new_priority,
             "reason": reason,
             "mention_count": mention_count,
             "promoted": was_promoted,
-            "previous_priority": data.get("priority", priority),
+            "previous_priority": previous_priority,
         }
 
     tasks_ref.add(

@@ -117,6 +117,17 @@
     cursor: pointer;
   }
   .complete-button:disabled { opacity: 0.5; cursor: default; }
+  .dismiss-button {
+    background: transparent;
+    color: var(--sub);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .dismiss-button:hover { color: #e05a5a; border-color: #e05a5a; }
+  .dismiss-button:disabled { opacity: 0.5; cursor: default; }
   .empty { color: var(--sub); font-size: 13px; }
 
   /* ---- アクセシビリティ（WCAG 2.2 AA）---- */
@@ -165,6 +176,20 @@
 <script>
 const priorityLabel = ['', '⚪', '🟢', '🟡', '🟠', '🔴'];
 
+// 対話UIと同じアプリトークン。?token=XXX で開くと保持し、保護APIに付与する。
+const APP_TOKEN = (() => {
+  const key = 'yui_app_token';
+  const fromUrl = new URLSearchParams(window.location.search).get('token');
+  if (fromUrl) { sessionStorage.setItem(key, fromUrl); return fromUrl; }
+  return sessionStorage.getItem(key) || '';
+})();
+
+function apiFetch(url, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (APP_TOKEN) headers['X-Yui-Token'] = APP_TOKEN;
+  return fetch(url, { ...options, headers });
+}
+
 // スクリーンリーダー通知（再描画で消える操作結果を伝える）
 const srLiveEl = document.getElementById('srLive');
 function announce(text) {
@@ -192,11 +217,24 @@ function card(task, extraClass) {
     completeBtn.textContent = '完了';
     completeBtn.addEventListener('click', async () => {
       completeBtn.disabled = true;
-      await fetch(`/tasks/${task.id}/complete`, { method: 'POST' });
+      await apiFetch(`/tasks/${task.id}/complete`, { method: 'POST' });
       announce(`「${task.title}」を完了にしました`);
       load();
     });
     top.appendChild(completeBtn);
+
+    // 誤って拾われたタスクをワンタップで取り消す（音声だと誤タスクに気づけないため）
+    const dismissBtn = document.createElement('button');
+    dismissBtn.className = 'dismiss-button';
+    dismissBtn.textContent = '取消';
+    dismissBtn.setAttribute('aria-label', `「${task.title}」を取り消す`);
+    dismissBtn.addEventListener('click', async () => {
+      dismissBtn.disabled = true;
+      await apiFetch(`/tasks/${task.id}`, { method: 'DELETE' });
+      announce(`「${task.title}」を取り消しました`);
+      load();
+    });
+    top.appendChild(dismissBtn);
   }
   div.appendChild(top);
 
@@ -216,7 +254,7 @@ function card(task, extraClass) {
     btn.addEventListener('click', async () => {
       if (!input.value.trim()) return;
       btn.disabled = true;
-      await fetch(`/tasks/${task.id}/answer`, {
+      await apiFetch(`/tasks/${task.id}/answer`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ answer: input.value.trim() }),
@@ -248,7 +286,7 @@ async function load() {
   const active = document.activeElement;
   if (active && active.matches && active.matches('.answer-row input')) return;
 
-  const res = await fetch('/tasks');
+  const res = await apiFetch('/tasks');
   const data = await res.json();
   const tasks = data.tasks || [];
 

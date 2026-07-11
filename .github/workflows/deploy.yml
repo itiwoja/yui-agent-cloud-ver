@@ -24,11 +24,17 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Verify dependencies
-        run: python -m pip install -r requirements.txt
+      - name: Install dependencies (runtime + dev)
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: ruff check .
 
       - name: Compile Python sources
         run: python -m compileall .
+
+      - name: Run tests
+        run: pytest -q
 
   deploy:
     name: Deploy to Cloud Run
@@ -57,4 +63,5 @@ jobs:
           --region asia-northeast1
           --project yui-agent-2026
           --allow-unauthenticated
+          --set-secrets=YUI_APP_TOKEN=yui-app-token:latest
           --quiet

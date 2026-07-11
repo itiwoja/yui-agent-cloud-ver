@@ -9,6 +9,7 @@ from google import genai
 from google.genai import types
 from google.cloud import firestore
 
+from priority import MAX_PRIORITY, promote
 from tasks_client import upsert_task
 
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "yui-agent-2026")
@@ -16,7 +17,8 @@ LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "asia-northeast1")
 MODEL = "gemini-2.5-flash"
 COLLECTION = "task_mentions"
 STALENESS_HOURS = float(os.environ.get("STALENESS_HOURS", "6"))
-MAX_PRIORITY = 5
+# システムが自律的に上げられる上限。既定は MAX（従来挙動）。下げれば🔴を人間の緊急に残せる。
+SYSTEM_ESCALATION_CEILING = int(os.environ.get("SYSTEM_ESCALATION_CEILING", str(MAX_PRIORITY)))
 RESEARCH_PRIORITY_THRESHOLD = 4
 
 
@@ -62,8 +64,17 @@ def run_autonomous_review() -> dict:
         if last_mentioned is None or last_mentioned > stale_cutoff:
             continue
 
+        # 滞留期間ごとに最大1回だけ昇格する。last_reviewed_at で直近の昇格を
+        # ガードしないと、30分毎のスケジューラ実行で毎回+1され、数時間で全部が
+        # 最上位(🔴)に張り付いてしまう（優先度が無意味化する飽和バグ）。
+        last_reviewed = data.get("last_reviewed_at")
+        if last_reviewed is not None and last_reviewed > stale_cutoff:
+            continue
+
         old_priority = data.get("priority", 1)
-        new_priority = min(MAX_PRIORITY, old_priority + 1)
+        new_priority = promote(old_priority, ceiling=SYSTEM_ESCALATION_CEILING)
+        if new_priority == old_priority:
+            continue
         reason = data.get("reason", "")
         update = {
             "priority": new_priority,

@@ -7,6 +7,7 @@ from google.genai import types
 from google.cloud import firestore
 from pydantic import BaseModel, Field
 
+import obs
 from calendar_client import get_today_events
 from extraction import ExtractedTask
 
@@ -78,7 +79,7 @@ def chat_turn(session_id: str, user_text: str, known_titles: list[str]) -> ChatR
     try:
         today_events = get_today_events()
     except Exception as exc:
-        print(f"[calendar] failed to get today's events: {exc}")
+        obs.warning("failed to get today's events", detail=str(exc))
         today_events = []
 
     contents = [

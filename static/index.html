@@ -116,6 +116,21 @@ const sessionId = (() => {
   return id;
 })();
 
+// アプリトークン: ?token=XXX で開くと sessionStorage に保持し、以後のAPI呼び出しに
+// X-Yui-Token として付ける。本番は未認証だと保護エンドポイントが401になる。
+const APP_TOKEN = (() => {
+  const key = 'yui_app_token';
+  const fromUrl = new URLSearchParams(window.location.search).get('token');
+  if (fromUrl) { sessionStorage.setItem(key, fromUrl); return fromUrl; }
+  return sessionStorage.getItem(key) || '';
+})();
+
+function apiFetch(url, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (APP_TOKEN) headers['X-Yui-Token'] = APP_TOKEN;
+  return fetch(url, { ...options, headers });
+}
+
 function queryNumber(name, fallback, min, max) {
   const value = Number(new URLSearchParams(window.location.search).get(name));
   return Number.isFinite(value) && value >= min && value <= max ? value : fallback;
@@ -231,7 +246,7 @@ function stopRecording() {
 async function handleUtterance(blob) {
   setState('thinking');
   try {
-    const transcribeRes = await fetch('/transcribe', {
+    const transcribeRes = await apiFetch('/transcribe', {
       method: 'POST',
       headers: { 'Content-Type': 'audio/webm' },
       body: blob,
@@ -246,7 +261,7 @@ async function handleUtterance(blob) {
     const inConversation = Date.now() < conversationActiveUntil;
     if (WAKE_PATTERN.test(text) || inConversation) {
       // 「ゆい」への呼びかけ、または会話継続中: 会話して声で返す
-      const chatRes = await fetch('/chat', {
+      const chatRes = await apiFetch('/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: sessionId, message: text }),
@@ -258,7 +273,7 @@ async function handleUtterance(blob) {
       }
     } else {
       // 呼びかけではない独り言: 声には出さず、静かにタスクだけ拾う
-      const processRes = await fetch('/process', {
+      const processRes = await apiFetch('/process', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
@@ -300,7 +315,7 @@ function speakAndWait(text) {
   return new Promise(async (resolve) => {
     setState('speaking');
     try {
-      const res = await fetch('/tts', {
+      const res = await apiFetch('/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),

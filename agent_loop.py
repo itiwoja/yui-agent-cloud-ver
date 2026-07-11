@@ -12,6 +12,7 @@ from google.genai import types
 from google.cloud import firestore
 from pydantic import BaseModel, Field
 
+from dedup import is_duplicate
 from tasks_client import upsert_task
 
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "yui-agent-2026")
@@ -113,6 +114,7 @@ def run_agent_loop() -> dict:
         reason = data.get("reason", "")
         priority = data.get("priority", 1)
 
+        asked_questions = data.get("asked_questions", [])
         diagnosis = _diagnose(title, reason)
         update = {}
 
@@ -128,7 +130,15 @@ def run_agent_loop() -> dict:
 
         elif diagnosis.action == "ask":
             question = diagnosis.question or "この件、詳しく教えてもらえますか？"
-            update = {"status": "needs_input", "pending_question": question}
+            # 一度した質問は繰り返さない（回答後に status が open へ戻るため、記憶が
+            # ないと同じ質問を無限に聞き返す退行が起きる）。既出なら様子見に倒す。
+            if is_duplicate(question, asked_questions):
+                continue
+            update = {
+                "status": "needs_input",
+                "pending_question": question,
+                "asked_questions": asked_questions + [question],
+            }
             asked.append({"title": title, "question": question})
 
         else:

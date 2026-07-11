@@ -5,6 +5,8 @@ from google.cloud import secretmanager
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
+from matching import titles_match
+
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "yui-agent-2026")
 TASKLIST_TITLE = "Yui"
 GOOGLE_SCOPES = [
@@ -69,7 +71,7 @@ def upsert_task(title: str, priority: int, reason: str) -> str:
 
     existing = service.tasks().list(tasklist=tasklist_id, showCompleted=False).execute()
     for task in existing.get("items", []):
-        if task.get("title", "").endswith(title):
+        if titles_match(task.get("title", ""), title):
             updated = service.tasks().patch(
                 tasklist=tasklist_id, task=task["id"],
                 body={"title": task_title, "notes": reason},
@@ -89,11 +91,23 @@ def complete_google_task(title: str) -> str | None:
     tasklist_id = _get_or_create_tasklist_id(service)
     existing = service.tasks().list(tasklist=tasklist_id, showCompleted=False).execute()
     for task in existing.get("items", []):
-        if task.get("title", "").endswith(title):
+        if titles_match(task.get("title", ""), title):
             completed = service.tasks().patch(
                 tasklist=tasklist_id,
                 task=task["id"],
                 body={"status": "completed"},
             ).execute()
             return completed["id"]
+    return None
+
+
+def delete_google_task(title: str) -> str | None:
+    """Yuiリスト内の同名タスクをGoogle Tasksから削除する（誤タスクの取り消し）。"""
+    service = _service()
+    tasklist_id = _get_or_create_tasklist_id(service)
+    existing = service.tasks().list(tasklist=tasklist_id, showCompleted=False).execute()
+    for task in existing.get("items", []):
+        if titles_match(task.get("title", ""), title):
+            service.tasks().delete(tasklist=tasklist_id, task=task["id"]).execute()
+            return task["id"]
     return None
