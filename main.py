@@ -11,9 +11,9 @@ from agent_loop import answer_question, list_tasks, run_agent_loop
 from autonomous_review import run_autonomous_review
 from chat import chat_turn
 from extraction import extract_tasks
-from memory_store import get_recent_titles, record_and_resolve
+from memory_store import complete_task, find_open_tasks, get_recent_titles, record_and_resolve
 from speech_to_text import transcribe_audio
-from tasks_client import upsert_task
+from tasks_client import complete_google_task, upsert_task
 from tts import synthesize_speech
 
 app = FastAPI(title="Yui Cloud Agent")
@@ -50,7 +50,8 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 def chat(request: ChatRequest) -> dict:
-    known_titles = get_recent_titles()
+    open_tasks = find_open_tasks()
+    known_titles = [task["title"] for task in open_tasks if task.get("title")]
     result = chat_turn(request.session_id, request.message, known_titles)
     resolved = [
         record_and_resolve(task.title, task.priority, task.reason)
@@ -58,7 +59,29 @@ def chat(request: ChatRequest) -> dict:
     ]
     for task in resolved:
         upsert_task(task["title"], task["priority"], task["reason"])
-    return {"reply": result.reply, "tasks": resolved}
+
+    completed = []
+    matched_ids = set()
+    for candidate in result.completed_task_titles:
+        normalized_candidate = "".join(candidate.lower().split())
+        for task in open_tasks:
+            normalized_title = "".join(task.get("title", "").lower().split())
+            if (
+                task["id"] not in matched_ids
+                and normalized_candidate
+                and normalized_title
+                and (
+                    normalized_candidate in normalized_title
+                    or normalized_title in normalized_candidate
+                )
+            ):
+                completed_task = complete_task(task["id"])
+                complete_google_task(task["title"])
+                completed.append(completed_task)
+                matched_ids.add(task["id"])
+                break
+
+    return {"reply": result.reply, "tasks": resolved, "completed_tasks": completed}
 
 
 class SpeechRequest(BaseModel):
@@ -101,6 +124,16 @@ class AnswerRequest(BaseModel):
 def post_answer(doc_id: str, request: AnswerRequest) -> dict:
     """ゆいからの質問にユーザーが回答し、タスクを前進させる。"""
     return answer_question(doc_id, request.answer)
+
+
+@app.post("/tasks/{doc_id}/complete")
+def post_complete(doc_id: str) -> dict:
+    """指定したタスクをFirestoreとGoogle Tasksの両方で完了にする。"""
+    task = complete_task(doc_id)
+    if "error" in task:
+        return task
+    google_task_id = complete_google_task(task["title"])
+    return {**task, "google_task_id": google_task_id}
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

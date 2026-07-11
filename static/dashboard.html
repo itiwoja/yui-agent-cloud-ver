@@ -79,6 +79,8 @@
   .card.ask { border-color: var(--ask); }
   .card.ask .card-note { color: var(--ask); }
   .card.progress { border-color: var(--progress); }
+  .card.done { border-color: var(--done); opacity: 0.72; }
+  .card.done .card-title { text-decoration: line-through; }
 
   .answer-row {
     display: flex;
@@ -104,6 +106,17 @@
     font-size: 13px;
     cursor: pointer;
   }
+  .complete-button {
+    margin-left: auto;
+    background: transparent;
+    color: var(--done);
+    border: 1px solid var(--done);
+    border-radius: 7px;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .complete-button:disabled { opacity: 0.5; cursor: default; }
   .empty { color: var(--sub); font-size: 13px; }
 </style>
 </head>
@@ -125,6 +138,10 @@
       <h2>未着手</h2>
       <div id="open-list"></div>
     </section>
+    <section id="done-section">
+      <h2>完了</h2>
+      <div id="done-list"></div>
+    </section>
   </main>
 
 <script>
@@ -144,6 +161,17 @@ function card(task, extraClass) {
   title.textContent = task.title;
   top.appendChild(title);
   top.appendChild(badge);
+  if (task.status !== 'done') {
+    const completeBtn = document.createElement('button');
+    completeBtn.className = 'complete-button';
+    completeBtn.textContent = '完了';
+    completeBtn.addEventListener('click', async () => {
+      completeBtn.disabled = true;
+      await fetch(`/tasks/${task.id}/complete`, { method: 'POST' });
+      load();
+    });
+    top.appendChild(completeBtn);
+  }
   div.appendChild(top);
 
   if (task.pending_question) {
@@ -196,13 +224,16 @@ async function load() {
   const askList = document.getElementById('ask-list');
   const progressList = document.getElementById('progress-list');
   const openList = document.getElementById('open-list');
+  const doneList = document.getElementById('done-list');
   askList.innerHTML = '';
   progressList.innerHTML = '';
   openList.innerHTML = '';
+  doneList.innerHTML = '';
 
   const asks = tasks.filter((t) => t.status === 'needs_input');
   const progressing = tasks.filter((t) => t.status === 'in_progress');
   const open = tasks.filter((t) => t.status === 'open' || !t.status);
+  const done = tasks.filter((t) => t.status === 'done');
 
   if (!asks.length) askList.innerHTML = '<div class="empty">今のところありません</div>';
   asks.forEach((t) => askList.appendChild(card(t, 'ask')));
@@ -212,6 +243,9 @@ async function load() {
 
   if (!open.length) openList.innerHTML = '<div class="empty">今のところありません</div>';
   open.forEach((t) => openList.appendChild(card(t)));
+
+  if (!done.length) doneList.innerHTML = '<div class="empty">まだありません</div>';
+  done.forEach((t) => doneList.appendChild(card(t, 'done')));
 }
 
 load();

@@ -7,6 +7,7 @@ from google.genai import types
 from google.cloud import firestore
 from pydantic import BaseModel, Field
 
+from calendar_client import get_today_events
 from extraction import ExtractedTask
 
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "yui-agent-2026")
@@ -27,10 +28,20 @@ replyで「それってどんな内容？」のように聞き返してくださ
 「既存タスク一覧」に同じ用件があれば、titleはその表記をそのまま使ってください。
 タスクを見つけたことをreplyの中でわざとらしく宣言する必要はありません、自然な会話の流れで触れる程度にしてください。"""
 
+COMPLETION_INSTRUCTION = """
+ユーザーが既存タスクを終えたと明確に報告した場合は、該当する名前をcompleted_task_titlesに入れてください。
+名前は「既存の未完了タスク一覧」の表記をそのまま使い、推測で完了扱いにしないでください。
+完了報告には、replyで短く自然にねぎらってください。同じタスクをtasksへ追加し直さないでください。"""
+
+CALENDAR_INSTRUCTION = """
+「今日の予定」がある場合は、必要に応じて予定時刻と未完了タスクを合わせ、取り組む順番や時間の使い方を
+具体的に提案してください。予定がない、または取得できない場合は、予定がないと断定せず会話を続けてください。"""
+
 
 class ChatResult(BaseModel):
     reply: str = Field(description="ゆいとしてユーザーへ返す会話的な応答文")
     tasks: list[ExtractedTask] = Field(default_factory=list)
+    completed_task_titles: list[str] = Field(default_factory=list)
 
 
 def _client() -> genai.Client:
@@ -64,13 +75,30 @@ def _append_message(session_id: str, role: str, text: str) -> None:
 def chat_turn(session_id: str, user_text: str, known_titles: list[str]) -> ChatResult:
     history = get_history(session_id)
 
+    try:
+        today_events = get_today_events()
+    except Exception as exc:
+        print(f"[calendar] failed to get today's events: {exc}")
+        today_events = []
+
     contents = [
         types.Content(role=msg["role"], parts=[types.Part(text=msg["text"])])
         for msg in history
     ]
 
     titles_block = "\n".join(f"- {t}" for t in known_titles) if known_titles else "（なし）"
-    user_message = f"既存タスク一覧:\n{titles_block}\n\n発言:\n{user_text}"
+    events_block = (
+        "\n".join(
+            f"- {event['summary']}: {event['start']} ～ {event['end']}"
+            for event in today_events
+        )
+        if today_events
+        else "（取得できた予定なし）"
+    )
+    user_message = (
+        f"既存の未完了タスク一覧:\n{titles_block}\n\n"
+        f"今日の予定（JST）:\n{events_block}\n\n発言:\n{user_text}"
+    )
     contents.append(types.Content(role="user", parts=[types.Part(text=user_message)]))
 
     client = _client()
@@ -78,7 +106,9 @@ def chat_turn(session_id: str, user_text: str, known_titles: list[str]) -> ChatR
         model=MODEL,
         contents=contents,
         config=types.GenerateContentConfig(
-            system_instruction=CHAT_SYSTEM_INSTRUCTION,
+            system_instruction=(
+                CHAT_SYSTEM_INSTRUCTION + COMPLETION_INSTRUCTION + CALENDAR_INSTRUCTION
+            ),
             temperature=0.4,
             response_mime_type="application/json",
             response_schema=ChatResult,

@@ -31,6 +31,42 @@ def get_recent_titles(limit: int = 30) -> list[str]:
     return seen
 
 
+def find_open_tasks(limit: int = 100) -> list[dict]:
+    """会話から完了対象を照合するため、done以外のタスクを返す。"""
+    docs = (
+        _client()
+        .collection(COLLECTION)
+        .order_by("last_mentioned_at", direction=firestore.Query.DESCENDING)
+        .limit(limit)
+        .get()
+    )
+    tasks = []
+    for doc in docs:
+        data = doc.to_dict()
+        if data.get("status", "open") == "done":
+            continue
+        tasks.append({"id": doc.id, **data})
+    return tasks
+
+
+def complete_task(doc_id: str) -> dict:
+    """Firestore上のタスクを完了にし、更新後の主要フィールドを返す。"""
+    ref = _client().collection(COLLECTION).document(doc_id)
+    snapshot = ref.get()
+    if not snapshot.exists:
+        return {"error": "task not found"}
+
+    completed_at = datetime.now(timezone.utc)
+    ref.update({"status": "done", "completed_at": completed_at})
+    data = snapshot.to_dict()
+    return {
+        "id": doc_id,
+        "title": data.get("title", ""),
+        "status": "done",
+        "completed_at": completed_at,
+    }
+
+
 def record_and_resolve(title: str, priority: int, reason: str) -> dict:
     """タスク言及を記録し、過去に同じタスクの言及があれば優先度を昇格して返す。"""
     db = _client()

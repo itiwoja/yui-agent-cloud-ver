@@ -4,6 +4,7 @@ google-genai==1.*
 google-cloud-firestore==2.*
 google-cloud-secret-manager==2.*
 google-api-python-client==2.*
+google-auth-oauthlib==1.*
 google-cloud-texttospeech==2.*
 google-cloud-speech==2.*
 pydantic==2.*

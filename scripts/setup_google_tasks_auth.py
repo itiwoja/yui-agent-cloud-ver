@@ -13,7 +13,10 @@ import sys
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 PROJECT_ID = "yui-agent-2026"
-SCOPES = ["https://www.googleapis.com/auth/tasks"]
+SCOPES = [
+    "https://www.googleapis.com/auth/tasks",
+    "https://www.googleapis.com/auth/calendar.readonly",
+]
 GCLOUD = (
     r"C:\Users\1kkim\AppData\Local\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd"
 )
@@ -64,6 +67,7 @@ def main() -> None:
     flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
     creds = flow.run_local_server(
         port=0, open_browser=False,
+        prompt="consent",
         authorization_prompt_message="AUTH_URL_START{url}AUTH_URL_END",
     )
 

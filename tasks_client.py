@@ -7,6 +7,10 @@ from googleapiclient.discovery import build
 
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "yui-agent-2026")
 TASKLIST_TITLE = "Yui"
+GOOGLE_SCOPES = [
+    "https://www.googleapis.com/auth/tasks",
+    "https://www.googleapis.com/auth/calendar.readonly",
+]
 
 PRIORITY_LABEL = {5: "🔴", 4: "🟠", 3: "🟡", 2: "🟢", 1: "⚪"}
 
@@ -21,7 +25,7 @@ def _access_secret(name: str) -> str:
     return response.payload.data.decode("utf-8").strip().lstrip("﻿")
 
 
-def _get_credentials() -> Credentials:
+def get_credentials() -> Credentials:
     global _credentials
     if _credentials is None:
         _credentials = Credentials(
@@ -30,13 +34,13 @@ def _get_credentials() -> Credentials:
             client_id=_access_secret("google-oauth-client-id"),
             client_secret=_access_secret("google-oauth-client-secret"),
             token_uri="https://oauth2.googleapis.com/token",
-            scopes=["https://www.googleapis.com/auth/tasks"],
+            scopes=GOOGLE_SCOPES,
         )
     return _credentials
 
 
 def _service():
-    return build("tasks", "v1", credentials=_get_credentials(), cache_discovery=False)
+    return build("tasks", "v1", credentials=get_credentials(), cache_discovery=False)
 
 
 def _get_or_create_tasklist_id(service) -> str:
@@ -77,3 +81,19 @@ def upsert_task(title: str, priority: int, reason: str) -> str:
         body={"title": task_title, "notes": reason},
     ).execute()
     return created["id"]
+
+
+def complete_google_task(title: str) -> str | None:
+    """Yuiリスト内の同名タスクをGoogle Tasks上でも完了にする。"""
+    service = _service()
+    tasklist_id = _get_or_create_tasklist_id(service)
+    existing = service.tasks().list(tasklist=tasklist_id, showCompleted=False).execute()
+    for task in existing.get("items", []):
+        if task.get("title", "").endswith(title):
+            completed = service.tasks().patch(
+                tasklist=tasklist_id,
+                task=task["id"],
+                body={"status": "completed"},
+            ).execute()
+            return completed["id"]
+    return None
