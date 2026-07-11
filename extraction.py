@@ -54,6 +54,8 @@ def extract_tasks(utterance: str, known_titles: list[str] | None = None) -> Extr
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
                 temperature=0,
+                # 優先度判断の質を上げるため動的思考を明示的に有効化する（裏で動くのでレイテンシは許容）。
+                thinking_config=types.ThinkingConfig(thinking_budget=-1),
                 response_mime_type="application/json",
                 response_schema=ExtractionResult,
             ),
