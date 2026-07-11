@@ -36,7 +36,7 @@ from speech_to_text import LOCATION as SPEECH_LOCATION
 from speech_to_text import MODEL as SPEECH_MODEL
 from speech_to_text import transcribe_audio
 from tasks_client import complete_google_task, delete_google_task, upsert_task
-from tts import synthesize_speech
+from tts import stream_synthesize, synthesize_speech
 from sentence_split import split_sentences
 
 app = FastAPI(title="Yui Cloud Agent")
@@ -401,6 +401,49 @@ async def converse(
         sentences = 0
         first_sentence_ms: float | None = None
         first_audio_ms: float | None = None
+
+        def sentence_audio_events(sentence: str):
+            nonlocal first_audio_ms
+            try:
+                for pcm in stream_synthesize(sentence):
+                    if first_audio_ms is None:
+                        first_audio_ms = round(
+                            (time.perf_counter() - started_at) * 1000, 1
+                        )
+                    yield _ndjson_event(
+                        {
+                            "type": "pcm",
+                            "rate": 24000,
+                            "data": base64.b64encode(pcm).decode("ascii"),
+                            "text": sentence,
+                        }
+                    )
+                return
+            except Exception as exc:
+                obs.warning(
+                    "stream_synthesize failed; falling back to synthesize_speech",
+                    route="/converse",
+                    api="texttospeech",
+                    request_id=request.state.request_id,
+                    session_id=session_id,
+                    chars=len(sentence),
+                    detail=str(exc),
+                    exc_type=type(exc).__name__,
+                )
+
+            audio = synthesize_speech(sentence)
+            if first_audio_ms is None:
+                first_audio_ms = round(
+                    (time.perf_counter() - started_at) * 1000, 1
+                )
+            yield _ndjson_event(
+                {
+                    "type": "audio",
+                    "data": base64.b64encode(audio).decode("ascii"),
+                    "text": sentence,
+                }
+            )
+
         try:
             yield _ndjson_event({"type": "transcript", "text": user_text})
             for chunk in stream_reply(session_id, user_text, context):
@@ -412,38 +455,16 @@ async def converse(
                         first_sentence_ms = round(
                             (time.perf_counter() - started_at) * 1000, 1
                         )
-                    audio = synthesize_speech(sentence)
-                    if first_audio_ms is None:
-                        first_audio_ms = round(
-                            (time.perf_counter() - started_at) * 1000, 1
-                        )
                     sentences += 1
-                    yield _ndjson_event(
-                        {
-                            "type": "audio",
-                            "data": base64.b64encode(audio).decode("ascii"),
-                            "text": sentence,
-                        }
-                    )
+                    yield from sentence_audio_events(sentence)
             if buffer.strip():
                 sentence = buffer.strip()
                 if first_sentence_ms is None:
                     first_sentence_ms = round(
                         (time.perf_counter() - started_at) * 1000, 1
                     )
-                audio = synthesize_speech(sentence)
-                if first_audio_ms is None:
-                    first_audio_ms = round(
-                        (time.perf_counter() - started_at) * 1000, 1
-                    )
                 sentences += 1
-                yield _ndjson_event(
-                    {
-                        "type": "audio",
-                        "data": base64.b64encode(audio).decode("ascii"),
-                        "text": sentence,
-                    }
-                )
+                yield from sentence_audio_events(sentence)
             reply = "".join(reply_parts)
             completed.append(True)
             yield _ndjson_event({"type": "done", "reply": reply})
