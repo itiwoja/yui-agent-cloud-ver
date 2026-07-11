@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from agent_loop import answer_question, list_tasks, run_agent_loop
 from auth import assert_token_configured, require_app_token
 from autonomous_review import run_autonomous_review
-from chat import chat_turn
+from chat import append_chat_history, chat_turn
 from confidence import filter_confident
 from extraction import extract_tasks
 from matching import titles_match
@@ -24,7 +24,6 @@ from rate_limit import require_rate_limit
 from memory_store import (
     complete_task,
     delete_task,
-    find_open_tasks,
     get_recent_titles,
     record_and_resolve,
 )
@@ -132,10 +131,8 @@ def chat(
     background_tasks: BackgroundTasks,
 ) -> dict:
     started_at = time.perf_counter()
-    open_tasks = find_open_tasks()
-    known_titles = [task["title"] for task in open_tasks if task.get("title")]
     try:
-        result = chat_turn(request.session_id, request.message, known_titles)
+        result, open_tasks = chat_turn(request.session_id, request.message)
     except Exception as exc:
         # モデル/Firestore障害でも、音声UIが無言にならないようキャラ内で謝って返す。
         obs.error(
@@ -151,6 +148,9 @@ def chat(
             "tasks": [],
             "completed_tasks": [],
         }
+    background_tasks.add_task(
+        append_chat_history, request.session_id, request.message, result.reply
+    )
     resolved = [
         record_and_resolve(task.title, task.priority, task.reason)
         for task in result.tasks

@@ -2,7 +2,7 @@
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from google.genai import types
 from google.cloud import firestore
@@ -12,6 +12,7 @@ import obs
 from calendar_client import get_today_events
 from clients import DEFAULT_MODEL, firestore_client, gemini_client
 from extraction import ExtractedTask
+from memory_store import find_open_tasks
 from retry import call_with_retry
 
 MODEL = DEFAULT_MODEL
@@ -101,18 +102,44 @@ def get_history(session_id: str, limit: int = HISTORY_LIMIT) -> list[dict]:
     return [doc.to_dict() for doc in docs]
 
 
-def _append_message(session_id: str, role: str, text: str) -> None:
-    _history_ref(session_id).add(
-        {"role": role, "text": text, "created_at": datetime.now(timezone.utc)}
-    )
+def append_chat_history(session_id: str, user_text: str, reply: str) -> None:
+    """会話の user/model メッセージを一つの Firestore batch で保存する。"""
+    try:
+        messages = _history_ref(session_id)
+        user_created_at = datetime.now(timezone.utc)
+        model_created_at = user_created_at + timedelta(microseconds=1)
+        batch = _db().batch()
+        batch.set(
+            messages.document(),
+            {"role": "user", "text": user_text, "created_at": user_created_at},
+        )
+        batch.set(
+            messages.document(),
+            {"role": "model", "text": reply, "created_at": model_created_at},
+        )
+        batch.commit()
+    except Exception as exc:
+        obs.error(
+            "append chat history failed",
+            api="firestore",
+            session_id=session_id,
+            detail=str(exc),
+            exc_type=type(exc).__name__,
+        )
 
 
-def chat_turn(session_id: str, user_text: str, known_titles: list[str]) -> ChatResult:
+def chat_turn(
+    session_id: str,
+    user_text: str,
+    open_tasks_fetcher=find_open_tasks,
+) -> tuple[ChatResult, list[dict]]:
     history_started_at = time.perf_counter()
     calendar_started_at = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    open_tasks_started_at = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=3) as executor:
         history_future = executor.submit(get_history, session_id)
         calendar_future = executor.submit(get_today_events)
+        open_tasks_future = executor.submit(open_tasks_fetcher)
         history = history_future.result()
         try:
             today_events = calendar_future.result()
@@ -125,8 +152,11 @@ def chat_turn(session_id: str, user_text: str, known_titles: list[str]) -> ChatR
                 exc_type=type(exc).__name__,
             )
             today_events = []
+        open_tasks = open_tasks_future.result()
     history_ms = round((time.perf_counter() - history_started_at) * 1000, 1)
     calendar_ms = round((time.perf_counter() - calendar_started_at) * 1000, 1)
+    open_tasks_ms = round((time.perf_counter() - open_tasks_started_at) * 1000, 1)
+    known_titles = [task["title"] for task in open_tasks if task.get("title")]
 
     contents = [
         types.Content(role=msg["role"], parts=[types.Part(text=msg["text"])])
@@ -176,23 +206,14 @@ def chat_turn(session_id: str, user_text: str, known_titles: list[str]) -> ChatR
     gemini_ms = round((time.perf_counter() - gemini_started_at) * 1000, 1)
     result = ChatResult.model_validate_json(response.text)
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        user_message_future = executor.submit(
-            _append_message, session_id, "user", user_text
-        )
-        model_message_future = executor.submit(
-            _append_message, session_id, "model", result.reply
-        )
-        user_message_future.result()
-        model_message_future.result()
-
     obs.info(
         "chat_turn timing",
         api="gemini",
         session_id=session_id,
         history_ms=history_ms,
         calendar_ms=calendar_ms,
+        open_tasks_ms=open_tasks_ms,
         gemini_ms=gemini_ms,
     )
 
-    return result
+    return result, open_tasks
