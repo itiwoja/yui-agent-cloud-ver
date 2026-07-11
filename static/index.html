@@ -103,7 +103,8 @@ const sessionId = (() => {
   return id;
 })();
 
-const SILENCE_MS = 1100;
+// 言い淀みや息継ぎで話し終わったと誤判定されないよう、無音判定は長めに取る
+const SILENCE_MS = 2200;
 const MIN_SPEECH_MS = 500;
 const MAX_RECORD_MS = 20000;
 const VOICE_THRESHOLD = 10;
