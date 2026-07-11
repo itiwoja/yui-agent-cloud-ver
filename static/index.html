@@ -141,13 +141,7 @@ const SILENCE_MS = queryNumber('silence', 2200, 200, 10000);
 const MIN_SPEECH_MS = queryNumber('minSpeech', 500, 100, 5000);
 const MAX_RECORD_MS = queryNumber('maxRecord', 20000, 1000, 60000);
 const VOICE_THRESHOLD = queryNumber('threshold', 10, 1, 128);
-// 音声認識が「ゆい」を同音の別表記に変換することがあるため候補を広めに取る
-const WAKE_PATTERN = /ゆい|ユイ|唯|結衣|由衣|由井|優依|夕依|yui/i;
-// 一度呼びかけたら、この時間内の発話は名前なしでも会話として扱う（雑談の継続）
-const CONVERSATION_WINDOW_MS = queryNumber('conversation', 45000, 1000, 300000);
-
 let ambientActive = false;
-let conversationActiveUntil = 0;
 let currentState = 'off';
 let tickerTimer = null;
 let stream = null;
@@ -164,13 +158,7 @@ let currentAudioUrl = null;
 let currentAudioResolve = null;
 
 function updateAmbientStatus() {
-  const now = Date.now();
-  if (now < conversationActiveUntil) {
-    const seconds = Math.ceil((conversationActiveUntil - now) / 1000);
-    statusEl.textContent = `💬 会話中（名前なしでOK・あと${seconds}秒）`;
-  } else {
-    statusEl.textContent = '🎧 聞いてるよ（呼ぶときは「ゆい」）';
-  }
+  statusEl.textContent = '🎧 聞いてるよ';
 }
 
 function setState(state) {
@@ -256,6 +244,14 @@ function stopRecording() {
   }
 }
 
+function showError(err) {
+  console.error('[yui]', err);
+  const unauthorized = err && err.status === 401;
+  hintEl.textContent = unauthorized
+    ? 'トークンが必要みたい。?token=... を付けたURLで開いてね'
+    : 'うまく通信できなかったよ。少し待ってからもう一度話しかけてね';
+}
+
 async function handleUtterance(blob) {
   setState('thinking');
   try {
@@ -264,6 +260,9 @@ async function handleUtterance(blob) {
       headers: { 'Content-Type': 'audio/webm' },
       body: blob,
     });
+    if (!transcribeRes.ok) {
+      throw Object.assign(new Error(`/transcribe ${transcribeRes.status}`), { status: transcribeRes.status });
+    }
     const transcribeData = await transcribeRes.json();
     const text = (transcribeData.text || '').trim();
     if (!text) {
@@ -271,34 +270,22 @@ async function handleUtterance(blob) {
       return;
     }
 
-    const inConversation = Date.now() < conversationActiveUntil;
-    if (WAKE_PATTERN.test(text) || inConversation) {
-      // 「ゆい」への呼びかけ、または会話継続中: 会話して声で返す
-      const chatRes = await apiFetch('/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sessionId, message: text }),
-      });
-      const chatData = await chatRes.json();
-      if (chatRes.ok && chatData.reply) {
-        conversationActiveUntil = Date.now() + CONVERSATION_WINDOW_MS;
-        await speakAndWait(chatData.reply);
-      }
-    } else {
-      // 呼びかけではない独り言: 声には出さず、静かにタスクだけ拾う
-      const processRes = await apiFetch('/process', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      });
-      const processData = await processRes.json();
-      if (processRes.ok && processData.tasks && processData.tasks.length) {
-        setState('captured');
-        await new Promise((r) => setTimeout(r, 900));
-      }
+    // 名前を呼ばれたかに関わらず、雑談として会話しながらタスクを拾う
+    const chatRes = await apiFetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, message: text }),
+    });
+    if (!chatRes.ok) {
+      throw Object.assign(new Error(`/chat ${chatRes.status}`), { status: chatRes.status });
+    }
+    const chatData = await chatRes.json();
+    if (chatData.reply) {
+      hintEl.textContent = chatData.reply;
+      await speakAndWait(chatData.reply);
     }
   } catch (err) {
-    // 通信エラーでも待機は止めず、次の発話を待つ
+    showError(err);
   } finally {
     if (ambientActive) startListening();
   }
@@ -333,7 +320,10 @@ function speakAndWait(text) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
       });
-      if (!res.ok) return resolve();
+      if (!res.ok) {
+        console.error('[yui] /tts', res.status);
+        return resolve();
+      }
       const blob = await res.blob();
       currentAudioUrl = URL.createObjectURL(blob);
       currentAudio = new Audio(currentAudioUrl);
@@ -342,6 +332,7 @@ function speakAndWait(text) {
       currentAudio.onerror = finishCurrentAudio;
       await currentAudio.play();
     } catch (err) {
+      console.error('[yui] /tts', err);
       if (currentAudio) finishCurrentAudio();
       else resolve();
     }
@@ -371,7 +362,7 @@ async function enableAmbient() {
   toggleBtn.classList.add('on');
   const hintKey = 'yui_initial_hint_shown';
   if (!localStorage.getItem(hintKey)) {
-    const hint = '「ゆい」と呼びかけてね。独り言も聞いてタスクにするよ';
+    const hint = '話しかけてね。雑談も聞いてタスクにするよ';
     localStorage.setItem(hintKey, '1');
     hintEl.textContent = hint;
     await speakAndWait(hint);
@@ -382,7 +373,6 @@ async function enableAmbient() {
 
 function disableAmbient() {
   ambientActive = false;
-  conversationActiveUntil = 0;
   if (tickerTimer) { clearInterval(tickerTimer); tickerTimer = null; }
   stopVadWatch();
   if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop();
