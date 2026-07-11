@@ -3,11 +3,12 @@
 MVP パイプライン:
     対話入力 → Gemini(タスク抽出・優先度・理由) → Firestore(記憶・優先度昇格) → Google Tasks
 """
+import asyncio
 import os
 import time
 import uuid
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -40,6 +41,32 @@ CONFIDENCE_THRESHOLD = float(os.environ.get("YUI_CONFIDENCE_THRESHOLD", "0.6"))
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
 
 
+def _upsert_task_background(title: str, priority: int, reason: str) -> None:
+    """Google Tasks の同期をレスポンス送信後に行う。"""
+    try:
+        upsert_task(title, priority, reason)
+    except Exception as exc:
+        obs.error(
+            "upsert_task failed",
+            api="google_tasks",
+            detail=str(exc),
+            exc_type=type(exc).__name__,
+        )
+
+
+def _complete_google_task_background(title: str) -> None:
+    """Google Tasks の完了同期をレスポンス送信後に行う。"""
+    try:
+        complete_google_task(title)
+    except Exception as exc:
+        obs.error(
+            "complete_google_task failed",
+            api="google_tasks",
+            detail=str(exc),
+            exc_type=type(exc).__name__,
+        )
+
+
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
     """リクエスト ID を設定し、レスポンスにも返す。"""
@@ -68,7 +95,7 @@ class UtteranceRequest(BaseModel):
 @app.post(
     "/process", dependencies=[Depends(require_app_token), Depends(require_rate_limit)]
 )
-def process(request: UtteranceRequest) -> dict:
+def process(request: UtteranceRequest, background_tasks: BackgroundTasks) -> dict:
     known_titles = get_recent_titles()
     try:
         extracted = extract_tasks(request.text, known_titles=known_titles)
@@ -82,7 +109,12 @@ def process(request: UtteranceRequest) -> dict:
         for task in confident_tasks
     ]
     for task in resolved:
-        upsert_task(task["title"], task["priority"], task["reason"])
+        background_tasks.add_task(
+            _upsert_task_background,
+            task["title"],
+            task["priority"],
+            task["reason"],
+        )
     return {"tasks": resolved}
 
 
@@ -94,7 +126,11 @@ class ChatRequest(BaseModel):
 @app.post(
     "/chat", dependencies=[Depends(require_app_token), Depends(require_rate_limit)]
 )
-def chat(request: ChatRequest, http_request: Request) -> dict:
+def chat(
+    request: ChatRequest,
+    http_request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict:
     started_at = time.perf_counter()
     open_tasks = find_open_tasks()
     known_titles = [task["title"] for task in open_tasks if task.get("title")]
@@ -120,7 +156,12 @@ def chat(request: ChatRequest, http_request: Request) -> dict:
         for task in result.tasks
     ]
     for task in resolved:
-        upsert_task(task["title"], task["priority"], task["reason"])
+        background_tasks.add_task(
+            _upsert_task_background,
+            task["title"],
+            task["priority"],
+            task["reason"],
+        )
 
     completed = []
     matched_ids = set()
@@ -130,7 +171,7 @@ def chat(request: ChatRequest, http_request: Request) -> dict:
                 continue
             if titles_match(candidate, task.get("title", "")):
                 completed_task = complete_task(task["id"])
-                complete_google_task(task["title"])
+                background_tasks.add_task(_complete_google_task_background, task["title"])
                 completed.append(completed_task)
                 matched_ids.add(task["id"])
                 break
@@ -190,7 +231,7 @@ async def transcribe(request: Request) -> dict:
     if len(audio_bytes) > MAX_AUDIO_BYTES:
         raise HTTPException(status_code=413, detail="audio payload too large")
     try:
-        text = transcribe_audio(audio_bytes)
+        text = await asyncio.to_thread(transcribe_audio, audio_bytes)
     except Exception as exc:
         obs.error(
             "transcribe_audio failed",

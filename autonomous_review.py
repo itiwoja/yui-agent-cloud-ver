@@ -5,18 +5,13 @@ Cloud Scheduler から定期的に叩かれることを想定。
 import os
 from datetime import datetime, timedelta, timezone
 
-from google import genai
-from google.genai import types
-from google.cloud import firestore
 
 import obs
+from clients import firestore_client, gemini_client
 from priority import MAX_PRIORITY, promote
-from retry import call_with_retry
+from research import research as _research
 from tasks_client import upsert_task
 
-PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "yui-agent-2026")
-LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "asia-northeast1")
-MODEL = "gemini-2.5-flash"
 COLLECTION = "task_mentions"
 STALENESS_HOURS = float(os.environ.get("STALENESS_HOURS", "6"))
 # システムが自律的に上げられる上限。既定は MAX（従来挙動）。下げれば🔴を人間の緊急に残せる。
@@ -25,32 +20,8 @@ RESEARCH_PRIORITY_THRESHOLD = 4
 REVIEW_LIMIT = int(os.environ.get("YUI_REVIEW_LIMIT", "500"))
 
 
-def _client() -> genai.Client:
-    return genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
-
-
-def _db() -> firestore.Client:
-    return firestore.Client(project=PROJECT_ID)
-
-
-def _research(title: str, reason: str) -> str:
-    """Google Search groundingで、タスクに関連する最新情報を裏どりする。"""
-    client = _client()
-    prompt = (
-        f"タスク「{title}」（背景: {reason}）に取り組むうえで役立つ、"
-        "最新かつ具体的な情報を日本語で2〜3文にまとめてください。"
-    )
-    response = call_with_retry(
-        lambda: client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0,
-                tools=[types.Tool(google_search=types.GoogleSearch())],
-            ),
-        )
-    )
-    return response.text.strip()
+_client = gemini_client
+_db = firestore_client
 
 
 def run_autonomous_review() -> dict:

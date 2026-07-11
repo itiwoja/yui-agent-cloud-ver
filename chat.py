@@ -1,21 +1,19 @@
 """複数ターンの会話をFirestoreに保持しつつ、Geminiで会話応答とタスク抽出を同時に行う。"""
-import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-from google import genai
 from google.genai import types
 from google.cloud import firestore
 from pydantic import BaseModel, Field
 
 import obs
 from calendar_client import get_today_events
+from clients import DEFAULT_MODEL, firestore_client, gemini_client
 from extraction import ExtractedTask
 from retry import call_with_retry
 
-PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "yui-agent-2026")
-LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "asia-northeast1")
-MODEL = "gemini-2.5-flash"
+MODEL = DEFAULT_MODEL
 CONVERSATIONS_COLLECTION = "conversations"
 HISTORY_LIMIT = 20
 
@@ -60,12 +58,8 @@ class ChatResult(BaseModel):
     completed_task_titles: list[str] = Field(default_factory=list)
 
 
-def _client() -> genai.Client:
-    return genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
-
-
-def _db() -> firestore.Client:
-    return firestore.Client(project=PROJECT_ID)
+_client = gemini_client
+_db = firestore_client
 
 
 def _history_ref(session_id: str):
@@ -90,21 +84,23 @@ def _append_message(session_id: str, role: str, text: str) -> None:
 
 def chat_turn(session_id: str, user_text: str, known_titles: list[str]) -> ChatResult:
     history_started_at = time.perf_counter()
-    history = get_history(session_id)
-    history_ms = round((time.perf_counter() - history_started_at) * 1000, 1)
-
     calendar_started_at = time.perf_counter()
-    try:
-        today_events = get_today_events()
-    except Exception as exc:
-        obs.warning(
-            "failed to get today's events",
-            api="calendar",
-            session_id=session_id,
-            detail=str(exc),
-            exc_type=type(exc).__name__,
-        )
-        today_events = []
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        history_future = executor.submit(get_history, session_id)
+        calendar_future = executor.submit(get_today_events)
+        history = history_future.result()
+        try:
+            today_events = calendar_future.result()
+        except Exception as exc:
+            obs.warning(
+                "failed to get today's events",
+                api="calendar",
+                session_id=session_id,
+                detail=str(exc),
+                exc_type=type(exc).__name__,
+            )
+            today_events = []
+    history_ms = round((time.perf_counter() - history_started_at) * 1000, 1)
     calendar_ms = round((time.perf_counter() - calendar_started_at) * 1000, 1)
 
     contents = [
@@ -155,8 +151,15 @@ def chat_turn(session_id: str, user_text: str, known_titles: list[str]) -> ChatR
     gemini_ms = round((time.perf_counter() - gemini_started_at) * 1000, 1)
     result = ChatResult.model_validate_json(response.text)
 
-    _append_message(session_id, "user", user_text)
-    _append_message(session_id, "model", result.reply)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        user_message_future = executor.submit(
+            _append_message, session_id, "user", user_text
+        )
+        model_message_future = executor.submit(
+            _append_message, session_id, "model", result.reply
+        )
+        user_message_future.result()
+        model_message_future.result()
 
     obs.info(
         "chat_turn timing",

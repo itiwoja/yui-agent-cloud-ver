@@ -1,18 +1,15 @@
 """Firestoreでタスク言及履歴を記憶し、過去言及との突合で優先度を昇格する。"""
-import os
 from datetime import datetime, timezone
 
 from google.cloud import firestore
 
+from clients import firestore_client
 from priority import promote
 
-PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "yui-agent-2026")
 COLLECTION = "task_mentions"
 PROMOTION_STEP = 1
 
-
-def _client() -> firestore.Client:
-    return firestore.Client(project=PROJECT_ID)
+_client = firestore_client
 
 
 def get_recent_titles(limit: int = 30) -> list[str]:

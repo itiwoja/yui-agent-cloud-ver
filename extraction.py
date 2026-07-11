@@ -1,15 +1,12 @@
 """雑な対話テキストからタスクを抽出する — Gemini構造化出力（Vertex AI, ADC認証）。"""
-import os
 
-from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
+from clients import DEFAULT_MODEL, gemini_client
 from retry import call_with_retry
 
-PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "yui-agent-2026")
-LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "asia-northeast1")
-MODEL = "gemini-2.5-flash"
+MODEL = DEFAULT_MODEL
 
 SYSTEM_INSTRUCTION = """あなたはユーザーの雑な独り言・思いつき・メモから、実行すべきタスクを発見する秘書エージェント「ゆい」です。
 この発言はマイクで拾った独り言であり、聞き返して確認することはできません。
@@ -36,8 +33,7 @@ class ExtractionResult(BaseModel):
     tasks: list[ExtractedTask]
 
 
-def _client() -> genai.Client:
-    return genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
+_client = gemini_client
 
 
 def extract_tasks(utterance: str, known_titles: list[str] | None = None) -> ExtractionResult:
