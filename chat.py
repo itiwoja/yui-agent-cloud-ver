@@ -21,6 +21,9 @@ MODEL = DEFAULT_MODEL
 CONVERSATIONS_COLLECTION = "conversations"
 DEFAULT_THINKING_BUDGET = 512
 DEFAULT_HISTORY_LIMIT = 12
+# The executor is intentionally process-lifetime: request-scoped executors add
+# thread creation latency, while Python shuts down this shared pool at exit.
+_context_executor = ThreadPoolExecutor(max_workers=4)
 
 
 class ContextBundle(TypedDict):
@@ -172,26 +175,25 @@ def _pending_questions_block(pending_questions: list[dict]) -> str:
 
 def prefetch_context(session_id: str) -> ContextBundle:
     """Fetch reply context concurrently while speech recognition is running."""
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        history_future = executor.submit(get_history, session_id)
-        calendar_future = executor.submit(get_today_events)
-        open_tasks_future = executor.submit(find_open_tasks)
-        pending_questions_future = executor.submit(find_pending_questions)
+    history_future = _context_executor.submit(get_history, session_id)
+    calendar_future = _context_executor.submit(get_today_events)
+    open_tasks_future = _context_executor.submit(find_open_tasks)
+    pending_questions_future = _context_executor.submit(find_pending_questions)
 
-        history = history_future.result()
-        try:
-            today_events = calendar_future.result()
-        except Exception as exc:
-            obs.warning(
-                "failed to get today's events",
-                api="calendar",
-                session_id=session_id,
-                detail=str(exc),
-                exc_type=type(exc).__name__,
-            )
-            today_events = []
-        open_tasks = open_tasks_future.result()
-        pending_questions = pending_questions_future.result()
+    history = history_future.result()
+    try:
+        today_events = calendar_future.result()
+    except Exception as exc:
+        obs.warning(
+            "failed to get today's events",
+            api="calendar",
+            session_id=session_id,
+            detail=str(exc),
+            exc_type=type(exc).__name__,
+        )
+        today_events = []
+    open_tasks = open_tasks_future.result()
+    pending_questions = pending_questions_future.result()
 
     return {
         "history": history,
@@ -210,25 +212,24 @@ def chat_turn(
     history_started_at = time.perf_counter()
     calendar_started_at = time.perf_counter()
     open_tasks_started_at = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        history_future = executor.submit(get_history, session_id)
-        calendar_future = executor.submit(get_today_events)
-        open_tasks_future = executor.submit(open_tasks_fetcher)
-        pending_questions_future = executor.submit(pending_questions_fetcher)
-        history = history_future.result()
-        try:
-            today_events = calendar_future.result()
-        except Exception as exc:
-            obs.warning(
-                "failed to get today's events",
-                api="calendar",
-                session_id=session_id,
-                detail=str(exc),
-                exc_type=type(exc).__name__,
-            )
-            today_events = []
-        open_tasks = open_tasks_future.result()
-        pending_questions = pending_questions_future.result()
+    history_future = _context_executor.submit(get_history, session_id)
+    calendar_future = _context_executor.submit(get_today_events)
+    open_tasks_future = _context_executor.submit(open_tasks_fetcher)
+    pending_questions_future = _context_executor.submit(pending_questions_fetcher)
+    history = history_future.result()
+    try:
+        today_events = calendar_future.result()
+    except Exception as exc:
+        obs.warning(
+            "failed to get today's events",
+            api="calendar",
+            session_id=session_id,
+            detail=str(exc),
+            exc_type=type(exc).__name__,
+        )
+        today_events = []
+    open_tasks = open_tasks_future.result()
+    pending_questions = pending_questions_future.result()
     history_ms = round((time.perf_counter() - history_started_at) * 1000, 1)
     calendar_ms = round((time.perf_counter() - calendar_started_at) * 1000, 1)
     open_tasks_ms = round((time.perf_counter() - open_tasks_started_at) * 1000, 1)

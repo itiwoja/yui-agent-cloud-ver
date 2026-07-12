@@ -6,6 +6,22 @@ tasks_client = pytest.importorskip("tasks_client")
 _find_matching_task = tasks_client._find_matching_task
 
 
+def test_upsert_task_reuses_the_task_list_cache_within_ttl(monkeypatch):
+    service = FakeUpsertService([])
+    tasks_client._task_cache.clear()
+    monkeypatch.setenv("YUI_TASKS_CACHE_TTL", "60")
+    _configure_upsert(monkeypatch, service)
+
+    tasks_client.upsert_task("Repeated task", 3, "first")
+    tasks_client.upsert_task("Repeated task", 3, "updated")
+
+    assert service.fake_tasks.list_calls == [
+        {"tasklist": "list-1", "showCompleted": False}
+    ]
+    assert len(service.fake_tasks.insert_calls) == 1
+    assert len(service.fake_tasks.patch_calls) == 1
+
+
 class FakeTasks:
     def __init__(self, items):
         self.items = items

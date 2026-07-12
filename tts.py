@@ -1,5 +1,6 @@
 """Google Cloud Text-to-Speechでゆいの返答を音声合成する。"""
 import os
+import threading
 from collections.abc import Iterator
 
 from google.cloud import texttospeech
@@ -8,12 +9,15 @@ VOICE_NAME = os.environ.get("YUI_VOICE_NAME", "ja-JP-Chirp3-HD-Leda")
 LANGUAGE_CODE = "ja-JP"
 
 _client = None
+_client_lock = threading.Lock()
 
 
 def _get_client() -> texttospeech.TextToSpeechClient:
     global _client
     if _client is None:
-        _client = texttospeech.TextToSpeechClient()
+        with _client_lock:
+            if _client is None:
+                _client = texttospeech.TextToSpeechClient()
     return _client
 
 

@@ -1,4 +1,5 @@
 """Google Calendarから今日の予定を読み取る。予定の作成・更新は行わない。"""
+import threading
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -7,10 +8,19 @@ from googleapiclient.discovery import build
 from tasks_client import get_credentials
 
 JST = ZoneInfo("Asia/Tokyo")
+_service_client = None
+_service_lock = threading.Lock()
 
 
 def _service():
-    return build("calendar", "v3", credentials=get_credentials(), cache_discovery=False)
+    global _service_client
+    if _service_client is None:
+        with _service_lock:
+            if _service_client is None:
+                _service_client = build(
+                    "calendar", "v3", credentials=get_credentials(), cache_discovery=False
+                )
+    return _service_client
 
 
 def get_today_events() -> list[dict[str, str]]:

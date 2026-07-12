@@ -93,6 +93,31 @@ def test_converse_falls_back_to_mp3_when_streaming_tts_fails(monkeypatch):
     assert events[1]["data"] == "bXAz"
 
 
+def test_converse_skips_mp3_after_streaming_tts_partial_success(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "prefetch_context",
+        lambda _session_id: {"history": [], "today_events": [], "open_tasks": []},
+    )
+    monkeypatch.setattr(main, "transcribe_audio", lambda _audio: "hello")
+    monkeypatch.setattr(main, "stream_reply", lambda *_args: iter(["Hello world."]))
+
+    def partial_stream(_text):
+        yield b"pcm"
+        raise RuntimeError("stream interrupted")
+
+    monkeypatch.setattr(main, "stream_synthesize", partial_stream)
+    monkeypatch.setattr(main, "synthesize_speech", pytest.fail)
+    monkeypatch.setattr(main, "enqueue_finalize_turn", lambda *_args, **_kwargs: True)
+
+    response = TestClient(main.app).post(
+        "/converse?session_id=session", content=b"audio", headers=HEADERS_AUDIO
+    )
+    events = [json.loads(line) for line in response.text.splitlines()]
+
+    assert [event["type"] for event in events] == ["transcript", "pcm", "done"]
+
+
 def test_converse_emits_empty_for_empty_transcript(monkeypatch):
     monkeypatch.setattr(
         main,
@@ -449,7 +474,7 @@ def test_finalize_turn_continues_after_one_task_persistence_failure(monkeypatch)
     monkeypatch.setattr(main, "extract_dialog_actions", lambda *_args: ([first, second], [], []))
     monkeypatch.setattr(main, "filter_confident", lambda tasks, _threshold: tasks)
 
-    def record(title, *_args):
+    def record(title, *_args, **_kwargs):
         if title == "First":
             raise RuntimeError("first failed")
         persisted.append(title)
@@ -464,3 +489,32 @@ def test_finalize_turn_continues_after_one_task_persistence_failure(monkeypatch)
     assert persisted == ["Second"]
     assert errors[0][0] == ("dialog action item failed",)
     assert errors[0][1]["stage"] == "record_and_resolve"
+
+
+def test_finalize_turn_fetches_open_tasks_once_and_reuses_them(monkeypatch):
+    open_tasks = [{"id": "task-1", "title": "Existing task"}]
+    fetched = []
+    received = []
+    extracted = [SimpleNamespace(title="New task", priority=2, reason="test")]
+    monkeypatch.setattr(main, "append_chat_history", lambda *_args: None)
+    monkeypatch.setattr(main, "get_recent_titles", lambda: [])
+    monkeypatch.setattr(main, "find_pending_questions", lambda: [])
+    monkeypatch.setattr(
+        main, "extract_dialog_actions", lambda *_args: (extracted, [], [])
+    )
+    monkeypatch.setattr(main, "filter_confident", lambda tasks, _threshold: tasks)
+    monkeypatch.setattr(
+        main, "find_open_tasks", lambda: fetched.append(True) or open_tasks
+    )
+    monkeypatch.setattr(
+        main,
+        "record_and_resolve",
+        lambda *_args, open_tasks=None: received.append(open_tasks)
+        or {"title": "New task", "priority": 2, "reason": "test"},
+    )
+    monkeypatch.setattr(main, "_upsert_task_background", lambda *_args: None)
+
+    main.finalize_turn("session", "hello", "reply")
+
+    assert fetched == [True]
+    assert received == [open_tasks]

@@ -7,6 +7,8 @@ import asyncio
 import base64
 import json
 import os
+import queue
+import threading
 import time
 import uuid
 
@@ -99,6 +101,52 @@ def _record_and_upsert_task_background(
         )
 
 
+def _enqueue_or_finalize_turn_background(
+    session_id: str,
+    user_text: str,
+    reply: str,
+    turn_id: str,
+    request_id: str,
+) -> None:
+    """Enqueue durable finalization without holding the response stream open."""
+    try:
+        if enqueue_finalize_turn(
+            session_id,
+            user_text,
+            reply,
+            turn_id=turn_id,
+            request_id=request_id,
+        ):
+            obs.info(
+                "converse finalization enqueued",
+                route="/converse",
+                request_id=request_id,
+                session_id=session_id,
+            )
+            return
+    except Exception as exc:
+        obs.error(
+            "converse finalization enqueue failed",
+            route="/converse",
+            request_id=request_id,
+            session_id=session_id,
+            detail=str(exc),
+            exc_type=type(exc).__name__,
+        )
+
+    try:
+        finalize_turn(session_id, user_text, reply, turn_id)
+    except Exception as exc:
+        obs.error(
+            "converse local finalization failed",
+            route="/converse",
+            request_id=request_id,
+            session_id=session_id,
+            detail=str(exc),
+            exc_type=type(exc).__name__,
+        )
+
+
 def _claim_finalization(turn_id: str) -> bool:
     """Atomically claim a turn so a Cloud Tasks retry cannot repeat its effects."""
     try:
@@ -124,9 +172,12 @@ def finalize_turn(
         extracted, completed_titles, question_answers = extract_dialog_actions(
             user_text, known_titles, pending_questions
         )
+        open_tasks = find_open_tasks()
         for task in filter_confident(extracted, CONFIDENCE_THRESHOLD):
             try:
-                resolved = record_and_resolve(task.title, task.priority, task.reason)
+                resolved = record_and_resolve(
+                    task.title, task.priority, task.reason, open_tasks=open_tasks
+                )
                 _upsert_task_background(
                     resolved["title"], resolved["priority"], resolved["reason"]
                 )
@@ -139,8 +190,6 @@ def finalize_turn(
                     detail=str(exc),
                     exc_type=type(exc).__name__,
                 )
-
-        open_tasks = find_open_tasks()
         matched_ids = set()
         for candidate in completed_titles:
             for task in open_tasks:
@@ -530,10 +579,7 @@ async def converse(
         )
     prefetch_ms = round((time.perf_counter() - prefetch_started_at) * 1000, 1)
 
-    reply_parts: list[str] = []
-
     def event_stream():
-        buffer = ""
         sentences = 0
         first_sentence_ms: float | None = None
         first_audio_ms: float | None = None
@@ -543,8 +589,10 @@ async def converse(
         # 区間の詳細時間は obs.info の stt_ms/first_audio_ms 等の構造化ログが担う。
         def sentence_audio_events(sentence: str):
             nonlocal first_audio_ms
+            emitted_pcm = False
             try:
                 for pcm in stream_synthesize(sentence):
+                    emitted_pcm = True
                     if first_audio_ms is None:
                         first_audio_ms = round(
                             (time.perf_counter() - started_at) * 1000, 1
@@ -559,6 +607,18 @@ async def converse(
                     )
                 return
             except Exception as exc:
+                if emitted_pcm:
+                    obs.warning(
+                        "streaming tts failed mid-sentence; skipping fallback",
+                        route="/converse",
+                        api="texttospeech",
+                        request_id=request.state.request_id,
+                        session_id=session_id,
+                        chars=len(sentence),
+                        detail=str(exc),
+                        exc_type=type(exc).__name__,
+                    )
+                    return
                 obs.warning(
                     "stream_synthesize failed; falling back to synthesize_speech",
                     route="/converse",
@@ -583,43 +643,63 @@ async def converse(
                 }
             )
 
+        events: queue.Queue[tuple[str, object]] = queue.Queue()
+        stop_producer = threading.Event()
+
+        def produce_sentences() -> None:
+            """Read Gemini continuously so TTS never blocks the next generation."""
+            buffer = ""
+            reply_parts: list[str] = []
+            try:
+                for chunk in stream_reply(session_id, user_text, context):
+                    if stop_producer.is_set():
+                        return
+                    reply_parts.append(chunk)
+                    buffer += chunk
+                    ready, buffer = split_sentences(buffer)
+                    for sentence in ready:
+                        events.put(("sentence", sentence))
+                if buffer.strip():
+                    events.put(("sentence", buffer.strip()))
+                events.put(("done", "".join(reply_parts)))
+            except Exception as exc:
+                events.put(("error", exc))
+
+        producer = threading.Thread(
+            target=produce_sentences, name="yui-gemini-stream", daemon=True
+        )
+
         try:
             yield _ndjson_event({"type": "transcript", "text": user_text})
-            for chunk in stream_reply(session_id, user_text, context):
-                reply_parts.append(chunk)
-                buffer += chunk
-                ready, buffer = split_sentences(buffer)
-                for sentence in ready:
-                    if first_sentence_ms is None:
-                        first_sentence_ms = round(
-                            (time.perf_counter() - started_at) * 1000, 1
-                        )
-                    sentences += 1
-                    yield from sentence_audio_events(sentence)
-            if buffer.strip():
-                sentence = buffer.strip()
+            producer.start()
+            reply = ""
+            while True:
+                event_type, payload = events.get()
+                if event_type == "error":
+                    raise payload
+                if event_type == "done":
+                    reply = payload
+                    break
+                sentence = payload
                 if first_sentence_ms is None:
                     first_sentence_ms = round(
                         (time.perf_counter() - started_at) * 1000, 1
                     )
                 sentences += 1
                 yield from sentence_audio_events(sentence)
-            reply = "".join(reply_parts)
             finalize_via = "skipped_empty_reply"
             if reply:
-                if enqueue_finalize_turn(
+                # BackgroundTasks runs this sync work in Starlette's worker pool after
+                # the stream completes, so Cloud Tasks latency cannot delay `done`.
+                background_tasks.add_task(
+                    _enqueue_or_finalize_turn_background,
                     session_id,
                     user_text,
                     reply,
-                    turn_id=turn_id,
-                    request_id=request.state.request_id,
-                ):
-                    finalize_via = "cloud_tasks"
-                else:
-                    background_tasks.add_task(
-                        finalize_turn, session_id, user_text, reply, turn_id
-                    )
-                    finalize_via = "background_fallback"
+                    turn_id,
+                    request.state.request_id,
+                )
+                finalize_via = "background_enqueue"
             else:
                 obs.warning(
                     "converse produced empty reply",
@@ -652,6 +732,10 @@ async def converse(
                 exc_type=type(exc).__name__,
             )
             yield _ndjson_event({"type": "error", "message": "converse unavailable"})
+        finally:
+            stop_producer.set()
+            if producer.is_alive():
+                producer.join()
 
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 

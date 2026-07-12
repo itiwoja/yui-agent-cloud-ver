@@ -135,7 +135,12 @@ def delete_task(doc_id: str) -> dict:
     return {"id": doc_id, "title": title, "status": "dismissed"}
 
 
-def record_and_resolve(title: str, priority: int, reason: str) -> dict:
+def record_and_resolve(
+    title: str,
+    priority: int,
+    reason: str,
+    open_tasks: list[dict] | None = None,
+) -> dict:
     """タスク言及を記録し、過去に同じタスクの言及があれば優先度を昇格して返す。"""
     db = _client()
     tasks_ref = db.collection(COLLECTION)
@@ -166,7 +171,10 @@ def record_and_resolve(title: str, priority: int, reason: str) -> dict:
                 exc_type=type(exc).__name__,
             )
         else:
-            for task in find_open_tasks():
+            # Callers that already loaded open tasks can share that snapshot and
+            # avoid a Firestore read for every extracted task.
+            candidates = find_open_tasks() if open_tasks is None else open_tasks
+            for task in candidates:
                 task_embedding = task.get("embedding")
                 if not task_embedding:
                     continue

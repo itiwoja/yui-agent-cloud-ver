@@ -1,12 +1,13 @@
 """Google Tasksへタスクを登録する。認証情報はSecret Managerに保存したrefresh tokenを使う。"""
 import os
 import threading
+import time
 
 from google.cloud import secretmanager
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-from matching import titles_match
+from matching import normalize_title, titles_match
 
 PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "yui-agent-2026")
 TASKLIST_TITLE = "Yui"
@@ -22,6 +23,15 @@ _credentials_lock = threading.Lock()
 _service_client = None
 _service_lock = threading.Lock()
 _tasklist_id = None
+_task_cache: dict[tuple[int, str], tuple[float, dict[str, dict]]] = {}
+_task_cache_lock = threading.Lock()
+
+
+def _tasks_cache_ttl() -> float:
+    try:
+        return max(0.0, float(os.environ.get("YUI_TASKS_CACHE_TTL", "60")))
+    except ValueError:
+        return 60.0
 
 
 def _access_secret(name: str) -> str:
@@ -74,10 +84,56 @@ def _get_or_create_tasklist_id(service) -> str:
     return _tasklist_id
 
 
+def _cached_tasks(service, tasklist_id: str) -> dict[str, dict]:
+    """Return the current tasklist index, fetching it once per TTL window."""
+    key = (id(service), tasklist_id)
+    now = time.monotonic()
+    with _task_cache_lock:
+        cached = _task_cache.get(key)
+        if cached and cached[0] > now:
+            return cached[1]
+
+        result = service.tasks().list(
+            tasklist=tasklist_id, showCompleted=False
+        ).execute()
+        indexed: dict[str, dict] = {}
+        for task in result.get("items", []):
+            normalized = normalize_title(task.get("title", ""))
+            if normalized:
+                indexed.setdefault(normalized, task)
+        _task_cache[key] = (now + _tasks_cache_ttl(), indexed)
+        return indexed
+
+
+def _update_cached_task(service, tasklist_id: str, task: dict) -> None:
+    key = (id(service), tasklist_id)
+    with _task_cache_lock:
+        cached = _task_cache.get(key)
+        if not cached or cached[0] <= time.monotonic():
+            return
+        index = cached[1]
+        for normalized, cached_task in list(index.items()):
+            if cached_task.get("id") == task.get("id"):
+                del index[normalized]
+        normalized = normalize_title(task.get("title", ""))
+        if normalized:
+            index[normalized] = task
+
+
+def _remove_cached_task(service, tasklist_id: str, task_id: str) -> None:
+    key = (id(service), tasklist_id)
+    with _task_cache_lock:
+        cached = _task_cache.get(key)
+        if not cached or cached[0] <= time.monotonic():
+            return
+        for normalized, task in list(cached[1].items()):
+            if task.get("id") == task_id:
+                del cached[1][normalized]
+
+
 def _find_matching_task(service, tasklist_id: str, title: str) -> dict | None:
     """未完了タスクを一度だけ取得し、タイトル一致するものを返す。"""
-    existing = service.tasks().list(tasklist=tasklist_id, showCompleted=False).execute()
-    for task in existing.get("items", []):
+    for task in _cached_tasks(service, tasklist_id).values():
         if titles_match(task.get("title", ""), title):
             return task
     return None
@@ -97,12 +153,20 @@ def upsert_task(title: str, priority: int, reason: str) -> str:
             tasklist=tasklist_id, task=existing["id"],
             body={"title": task_title, "notes": reason},
         ).execute()
+        _update_cached_task(
+            service,
+            tasklist_id,
+            {**existing, **updated, "title": task_title, "notes": reason},
+        )
         return updated["id"]
 
     created = service.tasks().insert(
         tasklist=tasklist_id,
         body={"title": task_title, "notes": reason},
     ).execute()
+    _update_cached_task(
+        service, tasklist_id, {**created, "title": task_title, "notes": reason}
+    )
     return created["id"]
 
 
@@ -117,6 +181,7 @@ def complete_google_task(title: str) -> str | None:
             task=existing["id"],
             body={"status": "completed"},
         ).execute()
+        _remove_cached_task(service, tasklist_id, existing["id"])
         return completed["id"]
     return None
 
@@ -128,5 +193,6 @@ def delete_google_task(title: str) -> str | None:
     existing = _find_matching_task(service, tasklist_id, title)
     if existing:
         service.tasks().delete(tasklist=tasklist_id, task=existing["id"]).execute()
+        _remove_cached_task(service, tasklist_id, existing["id"])
         return existing["id"]
     return None
