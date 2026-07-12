@@ -119,17 +119,111 @@ def test_converse_skips_mp3_after_streaming_tts_partial_success(monkeypatch):
 
 
 def test_converse_emits_empty_for_empty_transcript(monkeypatch):
+    finalizer_calls = []
     monkeypatch.setattr(
         main,
         "prefetch_context",
         lambda _session_id: {"history": [], "today_events": [], "open_tasks": []},
     )
     monkeypatch.setattr(main, "transcribe_audio", lambda _audio: "  ")
+    monkeypatch.setattr(
+        main,
+        "enqueue_finalize_turn",
+        lambda *args, **kwargs: finalizer_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        main,
+        "finalize_turn",
+        lambda *args, **kwargs: finalizer_calls.append((args, kwargs)),
+    )
 
     client = TestClient(main.app)
     response = client.post("/converse", content=b"audio", headers=HEADERS_AUDIO)
 
     assert [json.loads(line) for line in response.text.splitlines()] == [{"type": "empty"}]
+    assert finalizer_calls == []
+
+
+def test_converse_midstream_failure_emits_error_without_finalizing_turn(monkeypatch):
+    # Current behavior intentionally loses a partial turn after a Gemini stream error.
+    finalizer_calls = []
+    monkeypatch.setattr(
+        main,
+        "prefetch_context",
+        lambda _session_id: {"history": [], "today_events": [], "open_tasks": []},
+    )
+    monkeypatch.setattr(main, "transcribe_audio", lambda _audio: "hello")
+
+    def interrupted_reply(*_args):
+        # 半角ピリオドは文終端扱いされないため、確定文として流れる日本語文にする。
+        yield "最初の文はここまでです。"
+        raise RuntimeError("Gemini stream interrupted")
+
+    monkeypatch.setattr(main, "stream_reply", interrupted_reply)
+    monkeypatch.setattr(main, "stream_synthesize", lambda _text: iter([b"pcm"]))
+    monkeypatch.setattr(
+        main,
+        "enqueue_finalize_turn",
+        lambda *args, **kwargs: finalizer_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        main,
+        "finalize_turn",
+        lambda *args, **kwargs: finalizer_calls.append((args, kwargs)),
+    )
+
+    response = TestClient(main.app).post(
+        "/converse?session_id=session", content=b"audio", headers=HEADERS_AUDIO
+    )
+    events = [json.loads(line) for line in response.text.splitlines()]
+
+    assert [event["type"] for event in events] == ["transcript", "pcm", "error"]
+    assert events[-1]["message"] == "converse unavailable"
+    assert "done" not in [event["type"] for event in events]
+    assert finalizer_calls == []
+
+
+def test_converse_stt_failure_returns_ndjson_error(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "prefetch_context",
+        lambda _session_id: {"history": [], "today_events": [], "open_tasks": []},
+    )
+    monkeypatch.setattr(
+        main,
+        "transcribe_audio",
+        lambda _audio: (_ for _ in ()).throw(RuntimeError("STT unavailable")),
+    )
+
+    response = TestClient(main.app).post(
+        "/converse", content=b"audio", headers=HEADERS_AUDIO
+    )
+
+    assert response.status_code == 200
+    assert [json.loads(line) for line in response.text.splitlines()] == [
+        {"type": "error", "message": "speech-to-text unavailable"}
+    ]
+
+
+def test_converse_rejects_audio_larger_than_maximum(monkeypatch):
+    monkeypatch.setattr(main, "MAX_AUDIO_BYTES", 3)
+    monkeypatch.setattr(
+        main,
+        "prefetch_context",
+        lambda _session_id: {"history": [], "today_events": [], "open_tasks": []},
+    )
+    monkeypatch.setattr(
+        main,
+        "transcribe_audio",
+        lambda _audio: (_ for _ in ()).throw(AssertionError("must not transcribe")),
+    )
+
+    response = TestClient(main.app).post(
+        "/converse", content=b"four", headers=HEADERS_AUDIO
+    )
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "audio payload too large"}
 
 
 def test_finalize_converse_applies_matching_pending_question_answer(monkeypatch):
