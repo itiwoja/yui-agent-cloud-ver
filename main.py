@@ -138,6 +138,14 @@ def _enqueue_or_finalize_turn_background(
 
     try:
         finalize_turn(session_id, user_text, reply, turn_id)
+    except FinalizationInProgress:
+        obs.info(
+            "converse local finalization already in progress",
+            route="/converse",
+            request_id=request_id,
+            session_id=session_id,
+            turn_id=turn_id,
+        )
     except Exception as exc:
         # There is no retry mechanism for this local fallback; its claim remains
         # processing so a later durable delivery can reclaim it after staleness.
@@ -175,9 +183,14 @@ def _is_stale_finalization_claim(claimed_at) -> bool:
     return time.time() - claimed_at_seconds > _finalize_stale_sec()
 
 
-def _claim_finalization(session_id: str, turn_id: str) -> bool:
-    """Atomically claim a turn so a Cloud Tasks retry cannot repeat its effects."""
-    document = _finalization_document(turn_id)
+class FinalizationInProgress(Exception):
+    """A different delivery currently owns a turn's finalization claim."""
+
+
+def _claim_finalization(session_id: str, turn_id: str) -> str:
+    """Claim a turn, returning ``claimed``, ``duplicate``, or ``in_progress``."""
+    database = firestore_client()
+    document = database.collection("finalized_turns").document(turn_id)
     try:
         document.create(
             {
@@ -187,33 +200,65 @@ def _claim_finalization(session_id: str, turn_id: str) -> bool:
             }
         )
     except AlreadyExists:
-        claim = document.get().to_dict() or {}
-        if claim.get("status") == "done":
-            obs.info("finalize turn deduped", turn_id=turn_id)
-            return False
-        if claim.get("status") == "processing" and _is_stale_finalization_claim(
-            claim.get("claimed_at")
-        ):
-            document.update(
-                {"status": "processing", "claimed_at": firestore.SERVER_TIMESTAMP}
-            )
-            return True
-        if claim.get("status") == "processing":
-            obs.info("finalize turn in progress", turn_id=turn_id)
-            return False
-        obs.info("finalize turn deduped", turn_id=turn_id)
-        return False
-    return True
+        # The state check and a possible reclaim have to share one transaction:
+        # otherwise two retry deliveries can both observe a stale claim and run.
+        transaction = database.transaction()
+
+        @firestore.transactional
+        def check_existing_claim(transaction):
+            snapshot = next(transaction.get(document), None)
+            claim = snapshot.to_dict() if snapshot is not None else {}
+            status = claim.get("status")
+            if status == "done":
+                return "duplicate"
+            if status == "failed":
+                transaction.update(
+                    document,
+                    {"status": "processing", "claimed_at": firestore.SERVER_TIMESTAMP},
+                )
+                return "reclaimed_failed"
+            if status == "processing" and _is_stale_finalization_claim(
+                claim.get("claimed_at")
+            ):
+                transaction.update(
+                    document,
+                    {"status": "processing", "claimed_at": firestore.SERVER_TIMESTAMP},
+                )
+                return "reclaimed_stale"
+            if status == "processing":
+                return "in_progress"
+            return "duplicate"
+
+        outcome = check_existing_claim(transaction)
+        if outcome == "duplicate":
+            obs.info("finalize turn deduped", turn_id=turn_id, session_id=session_id)
+            return "duplicate"
+        if outcome == "in_progress":
+            obs.info("finalize turn in progress", turn_id=turn_id, session_id=session_id)
+            return "in_progress"
+        reason = "failed" if outcome == "reclaimed_failed" else "stale"
+        obs.info(
+            "finalize turn reclaimed",
+            turn_id=turn_id,
+            session_id=session_id,
+            reason=reason,
+        )
+        return "claimed"
+    return "claimed"
 
 
 def finalize_turn(
     session_id: str, user_text: str, reply: str, turn_id: str | None = None
 ) -> None:
     """Persist a completed conversation turn and apply its task actions."""
-    if turn_id and not _claim_finalization(session_id, turn_id):
-        return
-    append_chat_history(session_id, user_text, reply, raise_on_failure=True)
+    if turn_id:
+        claim = _claim_finalization(session_id, turn_id)
+        if claim == "duplicate":
+            return
+        if claim == "in_progress":
+            raise FinalizationInProgress(turn_id)
     try:
+        append_chat_history(session_id, user_text, reply, raise_on_failure=True)
         known_titles = get_recent_titles()
         pending_questions = find_pending_questions()
         extracted, completed_titles, question_answers = extract_dialog_actions(
@@ -285,11 +330,33 @@ def finalize_turn(
             detail=str(exc),
             exc_type=type(exc).__name__,
         )
+        if turn_id:
+            try:
+                _finalization_document(turn_id).update({"status": "failed"})
+            except Exception as marker_exc:
+                obs.error(
+                    "finalize turn failure-marker write failed",
+                    turn_id=turn_id,
+                    session_id=session_id,
+                    detail=str(marker_exc),
+                    exc_type=type(marker_exc).__name__,
+                )
         raise
     if turn_id:
-        _finalization_document(turn_id).update(
-            {"status": "done", "finished_at": firestore.SERVER_TIMESTAMP}
-        )
+        try:
+            _finalization_document(turn_id).update(
+                {"status": "done", "finished_at": firestore.SERVER_TIMESTAMP}
+            )
+        except Exception as exc:
+            # The effects are complete. Returning success prevents Cloud Tasks
+            # from replaying them merely because this bookkeeping write failed.
+            obs.error(
+                "finalize turn done-marker write failed",
+                turn_id=turn_id,
+                session_id=session_id,
+                detail=str(exc),
+                exc_type=type(exc).__name__,
+            )
 
 
 class FinalizeTurnRequest(BaseModel):
@@ -344,6 +411,14 @@ def internal_finalize_turn(request: FinalizeTurnRequest, http_request: Request) 
             )
         else:
             finalize_turn(request.session_id, request.user_text, request.reply)
+    except FinalizationInProgress as exc:
+        obs.info(
+            "finalize turn in progress",
+            route="/internal/finalize-turn",
+            session_id=request.session_id,
+            retry_count=retry_count,
+        )
+        raise HTTPException(status_code=409, detail="finalization in progress") from exc
     except Exception as exc:
         obs.error(
             "finalize turn failed",

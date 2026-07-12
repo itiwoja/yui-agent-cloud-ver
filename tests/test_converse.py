@@ -1,5 +1,6 @@
 import json
 import os
+import time
 import uuid
 from types import SimpleNamespace
 
@@ -408,7 +409,18 @@ def test_finalize_turn_deduplicates_an_existing_turn(monkeypatch):
             assert name == "finalized_turns"
             return Collection()
 
+        def transaction(self):
+            return Transaction()
+
+    class Transaction:
+        def get(self, reference):
+            return iter((reference.get(),))
+
+        def update(self, reference, data):
+            reference.update(data)
+
     monkeypatch.setattr(main, "firestore_client", lambda: Database())
+    monkeypatch.setattr(main.firestore, "transactional", lambda function: function)
     monkeypatch.setattr(
         main, "append_chat_history", lambda *args, **_kwargs: finalized.append(args)
     )
@@ -450,9 +462,19 @@ def test_finalize_turn_reclaims_a_stale_failed_history_write(monkeypatch):
             assert name == "finalized_turns"
             return SimpleNamespace(document=lambda _turn_id: document)
 
+        def transaction(self):
+            return Transaction()
+
+    class Transaction:
+        def get(self, reference):
+            return iter((reference.get(),))
+
+        def update(self, reference, data):
+            reference.update(data)
+
     writes = []
-    monkeypatch.setenv("YUI_FINALIZE_STALE_SEC", "0")
     monkeypatch.setattr(main, "firestore_client", lambda: Database())
+    monkeypatch.setattr(main.firestore, "transactional", lambda function: function)
     monkeypatch.setattr(main.firestore, "SERVER_TIMESTAMP", 0)
 
     def append_history(*_args, **_kwargs):
@@ -472,7 +494,171 @@ def test_finalize_turn_reclaims_a_stale_failed_history_write(monkeypatch):
 
     assert writes == [True, True]
     assert document.data["status"] == "done"
+    assert [update["status"] for update in document.updates] == [
+        "failed",
+        "processing",
+        "done",
+    ]
+
+
+def test_internal_finalize_turn_returns_409_for_a_fresh_processing_claim(monkeypatch):
+    from google.api_core.exceptions import AlreadyExists
+
+    class Document:
+        def create(self, _data):
+            raise AlreadyExists("already claimed")
+
+        def get(self):
+            return SimpleNamespace(
+                to_dict=lambda: {"status": "processing", "claimed_at": time.time()}
+            )
+
+        def update(self, _data):
+            pytest.fail("a fresh claim must not be reclaimed")
+
+    class Transaction:
+        def get(self, reference):
+            return iter((reference.get(),))
+
+        def update(self, reference, data):
+            reference.update(data)
+
+    document = Document()
+
+    class Database:
+        def collection(self, name):
+            assert name == "finalized_turns"
+            return SimpleNamespace(document=lambda _turn_id: document)
+
+        def transaction(self):
+            return Transaction()
+
+    monkeypatch.setattr(main, "firestore_client", lambda: Database())
+    monkeypatch.setattr(main.firestore, "transactional", lambda function: function)
+    monkeypatch.setattr(main, "append_chat_history", pytest.fail)
+
+    response = TestClient(main.app, raise_server_exceptions=False).post(
+        "/internal/finalize-turn",
+        json={
+            "session_id": "session",
+            "user_text": "hello",
+            "reply": "reply",
+            "turn_id": str(uuid.uuid4()),
+        },
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "finalization in progress"}
+
+
+def test_internal_finalize_turn_swallows_done_marker_failure(monkeypatch):
+    effects = []
+    errors = []
+
+    class Document:
+        def create(self, _data):
+            pass
+
+        def update(self, data):
+            if data["status"] == "done":
+                raise RuntimeError("done marker unavailable")
+
+    document = Document()
+
+    class Database:
+        def collection(self, name):
+            assert name == "finalized_turns"
+            return SimpleNamespace(document=lambda _turn_id: document)
+
+    monkeypatch.setattr(main, "firestore_client", lambda: Database())
+    monkeypatch.setattr(
+        main, "append_chat_history", lambda *args, **_kwargs: effects.append(args)
+    )
+    monkeypatch.setattr(main, "get_recent_titles", lambda: [])
+    monkeypatch.setattr(main, "find_pending_questions", lambda: [])
+    monkeypatch.setattr(main, "extract_dialog_actions", lambda *_args: ([], [], []))
+    monkeypatch.setattr(main, "find_open_tasks", lambda: [])
+    monkeypatch.setattr(
+        main.obs, "error", lambda *args, **kwargs: errors.append((args, kwargs))
+    )
+
+    response = TestClient(main.app, raise_server_exceptions=False).post(
+        "/internal/finalize-turn",
+        json={
+            "session_id": "session",
+            "user_text": "hello",
+            "reply": "reply",
+            "turn_id": str(uuid.uuid4()),
+        },
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 200
+    assert effects == [("session", "hello", "reply")]
+    assert errors[0][0] == ("finalize turn done-marker write failed",)
+
+
+def test_finalize_turn_reclaims_a_stale_processing_claim(monkeypatch):
+    from google.api_core.exceptions import AlreadyExists
+
+    class Document:
+        def __init__(self):
+            self.data = {"status": "processing", "claimed_at": 0}
+            self.updates = []
+
+        def create(self, _data):
+            raise AlreadyExists("already claimed")
+
+        def get(self):
+            return SimpleNamespace(to_dict=lambda: dict(self.data))
+
+        def update(self, data):
+            self.data.update(data)
+            self.updates.append(data)
+
+    class Transaction:
+        def get(self, reference):
+            return iter((reference.get(),))
+
+        def update(self, reference, data):
+            reference.update(data)
+
+    document = Document()
+
+    class Database:
+        def collection(self, name):
+            assert name == "finalized_turns"
+            return SimpleNamespace(document=lambda _turn_id: document)
+
+        def transaction(self):
+            return Transaction()
+
+    reclaimed = []
+    monkeypatch.setenv("YUI_FINALIZE_STALE_SEC", "0")
+    monkeypatch.setattr(main, "firestore_client", lambda: Database())
+    monkeypatch.setattr(main.firestore, "transactional", lambda function: function)
+    monkeypatch.setattr(main.firestore, "SERVER_TIMESTAMP", 0)
+    monkeypatch.setattr(main, "append_chat_history", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main, "get_recent_titles", lambda: [])
+    monkeypatch.setattr(main, "find_pending_questions", lambda: [])
+    monkeypatch.setattr(main, "extract_dialog_actions", lambda *_args: ([], [], []))
+    monkeypatch.setattr(main, "find_open_tasks", lambda: [])
+    monkeypatch.setattr(
+        main.obs,
+        "info",
+        lambda message, **kwargs: reclaimed.append((message, kwargs)),
+    )
+
+    main.finalize_turn("session", "hello", "reply", turn_id="turn-123")
+
     assert [update["status"] for update in document.updates] == ["processing", "done"]
+    assert reclaimed == [
+        (
+            "finalize turn reclaimed",
+            {"turn_id": "turn-123", "session_id": "session", "reason": "stale"},
+        )
+    ]
 
 
 def test_converse_does_not_finalize_an_empty_reply(monkeypatch):
