@@ -5,6 +5,8 @@ import time
 
 from fastapi import HTTPException, Request
 
+import obs
+
 DEFAULT_LIMIT = 30
 DEFAULT_WINDOW_SECONDS = 60.0
 _histories: dict[str, list[float]] = {}
@@ -55,7 +57,8 @@ def require_rate_limit(request: Request) -> None:
     エンドポイントを保護する補助的な制限である。
     """
     with _lock:
-        history = _histories.setdefault(_client_key(request), [])
+        client_key = _client_key(request)
+        history = _histories.setdefault(client_key, [])
         allowed = is_allowed(
             history,
             time.monotonic(),
@@ -63,6 +66,7 @@ def require_rate_limit(request: Request) -> None:
             _configured_window(),
         )
     if not allowed:
+        obs.warning("rate limited", client_key=client_key)
         raise HTTPException(status_code=429, detail="rate limit exceeded")
 
 

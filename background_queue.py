@@ -23,10 +23,17 @@ def _client() -> tasks_v2.CloudTasksClient:
     return _tasks_client
 
 
-def enqueue_finalize_turn(session_id: str, user_text: str, reply: str) -> bool:
+def enqueue_finalize_turn(
+    session_id: str, user_text: str, reply: str, request_id: str | None = None
+) -> bool:
     """Enqueue finalization of a streamed conversation, if Cloud Tasks is enabled."""
     service_url = os.environ.get("YUI_SERVICE_URL", "").rstrip("/")
     if not service_url:
+        obs.error("cloud tasks misconfigured", missing="YUI_SERVICE_URL")
+        return False
+    app_token = os.environ.get("YUI_APP_TOKEN", "")
+    if not app_token:
+        obs.error("cloud tasks misconfigured", missing="YUI_APP_TOKEN")
         return False
 
     queue = os.environ.get("YUI_TASKS_QUEUE", "yui-background")
@@ -40,7 +47,8 @@ def enqueue_finalize_turn(session_id: str, user_text: str, reply: str) -> bool:
                 url=f"{service_url}/internal/finalize-turn",
                 headers={
                     "Content-Type": "application/json",
-                    "X-Yui-Token": os.environ["YUI_APP_TOKEN"],
+                    "X-Yui-Token": app_token,
+                    **({"X-Request-Id": request_id} if request_id else {}),
                 },
                 body=json.dumps(
                     {

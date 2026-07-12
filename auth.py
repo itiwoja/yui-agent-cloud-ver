@@ -17,6 +17,8 @@ import secrets
 
 from fastapi import HTTPException, Request
 
+import obs
+
 APP_TOKEN_ENV = "YUI_APP_TOKEN"
 
 
@@ -61,4 +63,9 @@ def require_app_token(request: Request) -> None:
     """FastAPI 依存関数。保護対象ルートに Depends で挿す。"""
     provided = request.headers.get("x-yui-token", "") or request.query_params.get("token", "")
     if not is_authorized(_expected_token(), provided):
+        obs.warning(
+            "auth rejected",
+            path=request.url.path,
+            has_token=bool(provided),
+        )
         raise HTTPException(status_code=401, detail="unauthorized")

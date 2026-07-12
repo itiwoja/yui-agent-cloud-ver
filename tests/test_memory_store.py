@@ -104,6 +104,23 @@ def test_record_and_resolve_uses_higher_incoming_priority(monkeypatch):
     assert previous.updated[0]["priority"] == 5
 
 
+def test_exact_title_remention_uses_shared_resolver(monkeypatch):
+    previous = FakeDocument({"priority": 2, "mention_count": 1})
+    _configure_firestore(monkeypatch, [previous])
+    calls = []
+    monkeypatch.setattr(
+        memory_store,
+        "_resolve_remention",
+        lambda *args: calls.append(args) or {"title": "Exact task"},
+    )
+
+    assert memory_store.record_and_resolve("Exact task", 3, "updated") == {
+        "title": "Exact task"
+    }
+    assert calls[0][0] == previous.data
+    assert calls[0][1] is previous.reference
+
+
 def test_find_pending_questions_filters_and_limits_results(monkeypatch):
     pending = [
         FakeDocument(
@@ -212,7 +229,9 @@ def test_embedding_failure_falls_back_to_new_task(monkeypatch):
     memory_store.record_and_resolve("New task", 2, "new")
 
     assert "embedding" not in task_mentions.added[0]
-    assert warnings == [{"api": "embeddings"}]
+    assert warnings == [
+        {"api": "embeddings", "detail": "embedding unavailable", "exc_type": "RuntimeError"}
+    ]
 
 
 def test_disabled_semantic_matching_does_not_embed(monkeypatch):

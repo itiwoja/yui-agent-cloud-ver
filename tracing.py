@@ -10,6 +10,8 @@ import os
 from contextlib import contextmanager
 from typing import Iterator
 
+from fastapi import FastAPI
+
 import obs
 
 
@@ -31,7 +33,7 @@ def _tracing_requested() -> bool:
     return bool(os.environ.get("K_SERVICE")) or os.environ.get("YUI_TRACE") == "1"
 
 
-def setup_tracing(app) -> bool:
+def setup_tracing(app: FastAPI) -> bool:
     """Configure Cloud Trace and FastAPI instrumentation when tracing is enabled.
 
     Configuration failures are fail-open because observability must not prevent

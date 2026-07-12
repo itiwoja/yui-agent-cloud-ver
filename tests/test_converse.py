@@ -1,5 +1,6 @@
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,7 +29,7 @@ def test_converse_streams_transcript_audio_and_done(monkeypatch):
     monkeypatch.setattr(main, "transcribe_audio", lambda _audio: "hello")
     monkeypatch.setattr(main, "stream_reply", lambda *_args: iter(["Hello world."]))
     monkeypatch.setattr(main, "stream_synthesize", lambda _text: iter([b"pcm"]))
-    monkeypatch.setattr(main, "enqueue_finalize_turn", lambda *_args: True)
+    monkeypatch.setattr(main, "enqueue_finalize_turn", lambda *_args, **_kwargs: True)
 
     client = TestClient(main.app)
     response = client.post("/converse?session_id=session", content=b"audio", headers=HEADERS)
@@ -57,7 +58,7 @@ def test_converse_passes_prefetched_context_to_stream_reply(monkeypatch):
         or iter(["Hello."]),
     )
     monkeypatch.setattr(main, "stream_synthesize", lambda _text: iter([b"pcm"]))
-    monkeypatch.setattr(main, "enqueue_finalize_turn", lambda *_args: True)
+    monkeypatch.setattr(main, "enqueue_finalize_turn", lambda *_args, **_kwargs: True)
 
     client = TestClient(main.app)
     response = client.post("/converse?session_id=session", content=b"audio", headers=HEADERS)
@@ -80,7 +81,7 @@ def test_converse_falls_back_to_mp3_when_streaming_tts_fails(monkeypatch):
 
     monkeypatch.setattr(main, "stream_synthesize", fail_streaming_tts)
     monkeypatch.setattr(main, "synthesize_speech", lambda _text: b"mp3")
-    monkeypatch.setattr(main, "enqueue_finalize_turn", lambda *_args: True)
+    monkeypatch.setattr(main, "enqueue_finalize_turn", lambda *_args, **_kwargs: True)
 
     client = TestClient(main.app)
     response = client.post("/converse?session_id=session", content=b"audio", headers=HEADERS)
@@ -195,7 +196,7 @@ def test_converse_uses_local_background_finalizer_when_enqueue_fails(monkeypatch
     monkeypatch.setattr(main, "transcribe_audio", lambda _audio: "hello")
     monkeypatch.setattr(main, "stream_reply", lambda *_args: iter(["Hello."]))
     monkeypatch.setattr(main, "stream_synthesize", lambda _text: iter([b"pcm"]))
-    monkeypatch.setattr(main, "enqueue_finalize_turn", lambda *_args: False)
+    monkeypatch.setattr(main, "enqueue_finalize_turn", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(main, "finalize_turn", lambda *args: finalized.append(args))
 
     response = TestClient(main.app).post(
@@ -215,7 +216,7 @@ def test_converse_does_not_run_local_finalizer_when_enqueue_succeeds(monkeypatch
     monkeypatch.setattr(main, "transcribe_audio", lambda _audio: "hello")
     monkeypatch.setattr(main, "stream_reply", lambda *_args: iter(["Hello."]))
     monkeypatch.setattr(main, "stream_synthesize", lambda _text: iter([b"pcm"]))
-    monkeypatch.setattr(main, "enqueue_finalize_turn", lambda *_args: True)
+    monkeypatch.setattr(main, "enqueue_finalize_turn", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         main,
         "finalize_turn",
@@ -238,7 +239,9 @@ def test_converse_does_not_finalize_an_empty_reply(monkeypatch):
     )
     monkeypatch.setattr(main, "transcribe_audio", lambda _audio: "hello")
     monkeypatch.setattr(main, "stream_reply", lambda *_args: iter(()))
-    monkeypatch.setattr(main, "enqueue_finalize_turn", lambda *args: enqueued.append(args))
+    monkeypatch.setattr(
+        main, "enqueue_finalize_turn", lambda *args, **_kwargs: enqueued.append(args)
+    )
     monkeypatch.setattr(
         main,
         "finalize_turn",
@@ -293,3 +296,107 @@ def test_internal_finalize_turn_validates_and_returns_500_on_failure(monkeypatch
 
     assert too_long.status_code == 422
     assert failed.status_code == 500
+
+
+def test_converse_degrades_when_context_prefetch_fails(monkeypatch):
+    errors = []
+    monkeypatch.setattr(
+        main,
+        "prefetch_context",
+        lambda _session_id: (_ for _ in ()).throw(RuntimeError("firestore unavailable")),
+    )
+    monkeypatch.setattr(main, "transcribe_audio", lambda _audio: "hello")
+    monkeypatch.setattr(main, "stream_reply", lambda *_args: iter(["Hello."]))
+    monkeypatch.setattr(main, "stream_synthesize", lambda _text: iter([b"pcm"]))
+    monkeypatch.setattr(main, "enqueue_finalize_turn", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(main.obs, "error", lambda *args, **_kwargs: errors.append(args))
+
+    response = TestClient(main.app).post(
+        "/converse?session_id=session", content=b"audio", headers=HEADERS
+    )
+
+    assert response.status_code == 200
+    assert [json.loads(line)["type"] for line in response.text.splitlines()] == [
+        "transcript",
+        "pcm",
+        "done",
+    ]
+    assert errors == []
+
+
+def test_process_returns_success_when_background_task_persistence_fails(monkeypatch):
+    from extraction import ExtractedTask, ExtractionResult
+
+    errors = []
+    task = ExtractedTask(title="First", priority=2, reason="test", confidence=0.9)
+    monkeypatch.setattr(main, "get_recent_titles", lambda: [])
+    monkeypatch.setattr(
+        main, "extract_tasks", lambda *_args, **_kwargs: ExtractionResult(tasks=[task])
+    )
+    monkeypatch.setattr(main, "filter_confident", lambda tasks, _threshold: tasks)
+    monkeypatch.setattr(
+        main,
+        "record_and_resolve",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("firestore unavailable")),
+    )
+    monkeypatch.setattr(main.obs, "error", lambda *args, **kwargs: errors.append((args, kwargs)))
+
+    response = TestClient(main.app).post(
+        "/process", json={"text": "first"}, headers=HEADERS
+    )
+
+    assert response.status_code == 200
+    assert errors[0][0] == ("record_and_resolve failed",)
+    assert errors[0][1]["route"] == "/process"
+
+
+def test_chat_returns_success_when_background_task_persistence_fails(monkeypatch):
+    from extraction import ExtractedTask
+
+    errors = []
+    task = ExtractedTask(title="First", priority=2, reason="test", confidence=0.9)
+    result = SimpleNamespace(reply="ok", tasks=[task], completed_task_titles=[])
+    monkeypatch.setattr(main, "chat_turn", lambda *_args: (result, []))
+    monkeypatch.setattr(
+        main,
+        "record_and_resolve",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("firestore unavailable")),
+    )
+    monkeypatch.setattr(main.obs, "error", lambda *args, **kwargs: errors.append((args, kwargs)))
+
+    response = TestClient(main.app).post(
+        "/chat", json={"session_id": "session", "message": "first"}, headers=HEADERS
+    )
+
+    assert response.status_code == 200
+    assert errors[0][0] == ("record_and_resolve failed",)
+    assert errors[0][1]["route"] == "/chat"
+
+
+def test_finalize_turn_continues_after_one_task_persistence_failure(monkeypatch):
+    persisted = []
+    errors = []
+    first = SimpleNamespace(title="First", priority=2, reason="test")
+    second = SimpleNamespace(title="Second", priority=2, reason="test")
+    monkeypatch.setattr(main, "append_chat_history", lambda *_args: None)
+    monkeypatch.setattr(main, "get_recent_titles", lambda: [])
+    monkeypatch.setattr(main, "find_pending_questions", lambda: [])
+    monkeypatch.setattr(main, "find_open_tasks", lambda: [])
+    monkeypatch.setattr(main, "extract_dialog_actions", lambda *_args: ([first, second], [], []))
+    monkeypatch.setattr(main, "filter_confident", lambda tasks, _threshold: tasks)
+
+    def record(title, *_args):
+        if title == "First":
+            raise RuntimeError("first failed")
+        persisted.append(title)
+        return {"title": title, "priority": 2, "reason": "test"}
+
+    monkeypatch.setattr(main, "record_and_resolve", record)
+    monkeypatch.setattr(main, "_upsert_task_background", lambda *_args: None)
+    monkeypatch.setattr(main.obs, "error", lambda *args, **kwargs: errors.append((args, kwargs)))
+
+    main.finalize_turn("session", "hello", "reply")
+
+    assert persisted == ["Second"]
+    assert errors[0][0] == ("dialog action item failed",)
+    assert errors[0][1]["stage"] == "record_and_resolve"

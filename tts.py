@@ -1,5 +1,6 @@
 """Google Cloud Text-to-Speechでゆいの返答を音声合成する。"""
 import os
+from collections.abc import Iterator
 
 from google.cloud import texttospeech
 
@@ -31,7 +32,7 @@ def synthesize_speech(text: str) -> bytes:
     return response.audio_content
 
 
-def stream_synthesize(text: str):
+def stream_synthesize(text: str) -> Iterator[bytes]:
     """Yield 24 kHz 16-bit little-endian PCM chunks from Streaming TTS.
 
     Chirp 3: HD voices require the streaming RPC's configuration request to

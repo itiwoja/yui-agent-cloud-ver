@@ -1,6 +1,7 @@
 """複数ターンの会話をFirestoreに保持しつつ、Geminiで会話応答とタスク抽出を同時に行う。"""
 import os
 import time
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import TypedDict
@@ -203,8 +204,8 @@ def prefetch_context(session_id: str) -> ContextBundle:
 def chat_turn(
     session_id: str,
     user_text: str,
-    open_tasks_fetcher=find_open_tasks,
-    pending_questions_fetcher=find_pending_questions,
+    open_tasks_fetcher: Callable[[], list[dict]] = find_open_tasks,
+    pending_questions_fetcher: Callable[[], list[dict]] = find_pending_questions,
 ) -> tuple[ChatResult, list[dict]]:
     history_started_at = time.perf_counter()
     calendar_started_at = time.perf_counter()
@@ -306,7 +307,7 @@ def stream_reply(
     session_id: str,
     user_text: str,
     context: ContextBundle | None = None,
-):
+) -> Iterator[str]:
     """Yield Gemini reply text as it arrives, without waiting for JSON output.
 
     A caller may provide context fetched in parallel with another operation.  The

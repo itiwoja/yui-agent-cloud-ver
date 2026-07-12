@@ -17,12 +17,12 @@
     --secondary: #D0D6E0;
     --sub: #8A8F98;
     --quiet: #62666D;
-    --accent: #5E6AD2;
+    --accent: #6E5BD6;
     --accent-hover: #828FFF;
-    --accent-light: #A8B1FF;
-    --ambient: #5E6AD2;
+    --accent-light: #B3A8FF;
+    --ambient: #6E5BD6;
     --captured: #4FD18B;
-    --speaking: #5E6AD2;
+    --speaking: #6E5BD6;
     --thinking: #C99BFF;
     --off: #E05A5A;
   }
@@ -40,7 +40,7 @@
     gap: 22px;
   }
   h1 { font-size: 13px; font-weight: 600; letter-spacing: 0.32em; color: var(--sub); margin: 0 0 4px 0.32em; }
-  .wordmark-note { margin: 0; color: var(--quiet); font-size: 12px; line-height: 1.5; }
+  .wordmark-note { margin: 0; color: var(--sub); font-size: 12px; line-height: 1.5; }
   main {
     display: flex;
     flex-direction: column;
@@ -75,8 +75,8 @@
     transform: scaleY(.4);
     transform-origin: center;
   }
-  #orb:hover { border-color: rgba(168,177,255,.8); background: radial-gradient(circle at 35% 28%, #2a2c38 0%, var(--surface-raised) 62%, var(--panel) 100%); }
-  #orb.ambient { border-color: var(--ambient); box-shadow: inset 0 0 0 1px rgba(168,177,255,.16), 0 0 32px rgba(94,106,210,.18); animation: breathe 3.2s ease-in-out infinite; }
+  #orb:hover { border-color: rgba(179,168,255,.8); background: radial-gradient(circle at 35% 28%, #2a2c38 0%, var(--surface-raised) 62%, var(--panel) 100%); }
+  #orb.ambient { border-color: var(--ambient); box-shadow: inset 0 0 0 1px rgba(179,168,255,.16), 0 0 32px rgba(110,91,214,.18); animation: breathe 3.2s ease-in-out infinite; }
   #orb.ambient .orb-bars span { height: 30px; background: var(--accent-light); animation: ambient-bars 2.4s ease-in-out infinite; }
   #orb.ambient .orb-bars span:nth-child(1) { animation-delay: -0.48s; }
   #orb.ambient .orb-bars span:nth-child(2) { animation-delay: -0.24s; }
@@ -88,7 +88,7 @@
   #orb.thinking { border-color: var(--thinking); box-shadow: inset 0 0 0 1px rgba(201,155,255,.2), 0 0 32px rgba(201,155,255,.2); }
   #orb.thinking .orb-bars span { background: #1F2023; }
   #orb.thinking .orb-bars span:nth-child(3) { height: 30px; background: var(--thinking); animation: thinking-bar 1.1s ease-in-out infinite; }
-  #orb.speaking { border-color: var(--accent-light); box-shadow: inset 0 0 0 1px rgba(168,177,255,.2), 0 0 36px rgba(94,106,210,.3); animation: pulse 0.9s ease-in-out infinite; }
+  #orb.speaking { border-color: var(--accent-light); box-shadow: inset 0 0 0 1px rgba(179,168,255,.2), 0 0 36px rgba(110,91,214,.3); animation: pulse 0.9s ease-in-out infinite; }
   #orb.speaking .orb-bars span { height: 30px; background: var(--accent); animation: speaking-bars .7s ease-in-out infinite; }
   #orb.speaking .orb-bars span:nth-child(1) { animation-delay: -0.18s; }
   #orb.speaking .orb-bars span:nth-child(2) { animation-delay: -0.36s; }
@@ -104,10 +104,11 @@
 
   #status { font-size: 14px; color: var(--sub); min-height: 20px; }
   #status::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--quiet); vertical-align: 1px; }
-  #orb.ambient ~ #status::before, #orb.speaking ~ #status::before { background: var(--accent); box-shadow: 0 0 12px rgba(94,106,210,.72); }
+  #orb.ambient ~ #status::before, #orb.speaking ~ #status::before { background: var(--accent); box-shadow: 0 0 12px rgba(110,91,214,.72); }
   #orb.captured ~ #status::before { background: var(--captured); box-shadow: 0 0 12px rgba(79,209,139,.64); }
   #orb.thinking ~ #status::before { background: var(--thinking); box-shadow: 0 0 12px rgba(201,155,255,.64); }
   #hint { font-size: 14px; color: var(--sub); min-height: 20px; }
+  #hint.error { color: var(--off); }
 
   #toggle {
     position: fixed;
@@ -139,7 +140,7 @@
   #dashLink:hover { color: var(--accent-light); }
 
   /* ---- アクセシビリティ（WCAG 2.2 AA）---- */
-  :focus-visible { outline: 2px solid rgba(94,106,210,.4); outline-offset: 4px; box-shadow: 0 0 0 4px rgba(94,106,210,.2); }
+  :focus-visible { outline: 2px solid var(--accent-light); outline-offset: 4px; box-shadow: 0 0 0 4px rgba(179,168,255,.25); }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
       animation: none !important;
@@ -313,6 +314,7 @@ function stopRecording() {
 function showError(err) {
   console.error('[yui]', err);
   const unauthorized = err && err.status === 401;
+  hintEl.classList.add('error');
   hintEl.textContent = unauthorized
     ? 'トークンが必要みたい。?token=... を付けたURLで開いてね'
     : 'うまく通信できなかったよ。少し待ってからもう一度話しかけてね';
@@ -380,6 +382,7 @@ async function readConverseStream(response, startedAt) {
 
   const handleEvent = async (event) => {
     if (event.type === 'transcript') {
+      hintEl.classList.remove('error');
       hintEl.textContent = event.text || '';
     } else if (event.type === 'empty') {
       sawDone = true;
@@ -501,7 +504,7 @@ function speakAndWait(text) {
         body: JSON.stringify({ text }),
       });
       if (!res.ok) {
-        console.error('[yui] /tts', res.status);
+        showError(Object.assign(new Error(`/tts ${res.status}`), { status: res.status }));
         return resolve();
       }
       const blob = await res.blob();
@@ -512,7 +515,7 @@ function speakAndWait(text) {
       currentAudio.onerror = finishCurrentAudio;
       await currentAudio.play();
     } catch (err) {
-      console.error('[yui] /tts', err);
+      showError(err);
       if (currentAudio) finishCurrentAudio();
       else resolve();
     }
@@ -545,6 +548,7 @@ async function enableAmbient() {
   if (!localStorage.getItem(hintKey)) {
     const hint = '話しかけてね。雑談も聞いてタスクにするよ';
     localStorage.setItem(hintKey, '1');
+    hintEl.classList.remove('error');
     hintEl.textContent = hint;
     await speakAndWait(hint);
   }

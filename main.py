@@ -19,7 +19,7 @@ from agent_loop import answer_question, list_tasks, run_agent_loop
 from auth import assert_token_configured, require_app_token
 from autonomous_review import run_autonomous_review
 from background_queue import enqueue_finalize_turn
-from chat import append_chat_history, chat_turn, prefetch_context, stream_reply
+from chat import ContextBundle, append_chat_history, chat_turn, prefetch_context, stream_reply
 from confidence import filter_confident
 from dialog_actions import extract_dialog_actions
 from extraction import extract_tasks
@@ -58,6 +58,7 @@ def _upsert_task_background(title: str, priority: int, reason: str) -> None:
         obs.error(
             "upsert_task failed",
             api="google_tasks",
+            title=title,
             detail=str(exc),
             exc_type=type(exc).__name__,
         )
@@ -71,6 +72,26 @@ def _complete_google_task_background(title: str) -> None:
         obs.error(
             "complete_google_task failed",
             api="google_tasks",
+            title=title,
+            detail=str(exc),
+            exc_type=type(exc).__name__,
+        )
+
+
+def _record_and_upsert_task_background(
+    title: str, priority: int, reason: str, route: str
+) -> None:
+    """Persist one extracted task without allowing a failure to stop its peers."""
+    try:
+        resolved = record_and_resolve(title, priority, reason)
+        _upsert_task_background(
+            resolved["title"], resolved["priority"], resolved["reason"]
+        )
+    except Exception as exc:
+        obs.error(
+            "record_and_resolve failed",
+            route=route,
+            title=title,
             detail=str(exc),
             exc_type=type(exc).__name__,
         )
@@ -86,10 +107,20 @@ def finalize_turn(session_id: str, user_text: str, reply: str) -> None:
             user_text, known_titles, pending_questions
         )
         for task in filter_confident(extracted, CONFIDENCE_THRESHOLD):
-            resolved = record_and_resolve(task.title, task.priority, task.reason)
-            _upsert_task_background(
-                resolved["title"], resolved["priority"], resolved["reason"]
-            )
+            try:
+                resolved = record_and_resolve(task.title, task.priority, task.reason)
+                _upsert_task_background(
+                    resolved["title"], resolved["priority"], resolved["reason"]
+                )
+            except Exception as exc:
+                obs.error(
+                    "dialog action item failed",
+                    stage="record_and_resolve",
+                    title=task.title,
+                    session_id=session_id,
+                    detail=str(exc),
+                    exc_type=type(exc).__name__,
+                )
 
         open_tasks = find_open_tasks()
         matched_ids = set()
@@ -98,9 +129,19 @@ def finalize_turn(session_id: str, user_text: str, reply: str) -> None:
                 if task["id"] in matched_ids:
                     continue
                 if titles_match(candidate, task.get("title", "")):
-                    complete_task(task["id"])
-                    _complete_google_task_background(task["title"])
-                    matched_ids.add(task["id"])
+                    try:
+                        complete_task(task["id"])
+                        _complete_google_task_background(task["title"])
+                        matched_ids.add(task["id"])
+                    except Exception as exc:
+                        obs.error(
+                            "dialog action item failed",
+                            stage="complete_task",
+                            title=task.get("title", candidate),
+                            session_id=session_id,
+                            detail=str(exc),
+                            exc_type=type(exc).__name__,
+                        )
                     break
 
         matched_question_ids = set()
@@ -164,8 +205,9 @@ def health() -> dict:
 
 
 @app.post("/internal/finalize-turn", dependencies=[Depends(require_app_token)])
-def internal_finalize_turn(request: FinalizeTurnRequest) -> dict:
+def internal_finalize_turn(request: FinalizeTurnRequest, http_request: Request) -> dict:
     """Run a durable Cloud Tasks finalization request."""
+    retry_count = http_request.headers.get("x-cloudtasks-taskretrycount")
     try:
         finalize_turn(request.session_id, request.user_text, request.reply)
     except Exception as exc:
@@ -173,10 +215,17 @@ def internal_finalize_turn(request: FinalizeTurnRequest) -> dict:
             "finalize turn failed",
             route="/internal/finalize-turn",
             session_id=request.session_id,
+            retry_count=retry_count,
             detail=str(exc),
             exc_type=type(exc).__name__,
         )
         raise HTTPException(status_code=500, detail="finalize turn failed") from exc
+    obs.info(
+        "finalize turn completed",
+        route="/internal/finalize-turn",
+        session_id=request.session_id,
+        retry_count=retry_count,
+    )
     return {"status": "ok"}
 
 
@@ -196,18 +245,15 @@ def process(request: UtteranceRequest, background_tasks: BackgroundTasks) -> dic
         obs.error("extract_tasks failed", route="/process", detail=str(exc))
         return {"tasks": []}
     confident_tasks = filter_confident(extracted.tasks, CONFIDENCE_THRESHOLD)
-    resolved = [
-        record_and_resolve(task.title, task.priority, task.reason)
-        for task in confident_tasks
-    ]
-    for task in resolved:
+    for task in confident_tasks:
         background_tasks.add_task(
-            _upsert_task_background,
-            task["title"],
-            task["priority"],
-            task["reason"],
+            _record_and_upsert_task_background,
+            task.title,
+            task.priority,
+            task.reason,
+            "/process",
         )
-    return {"tasks": resolved}
+    return {"tasks": confident_tasks}
 
 
 class ChatRequest(BaseModel):
@@ -244,16 +290,13 @@ def chat(
     background_tasks.add_task(
         append_chat_history, request.session_id, request.message, result.reply
     )
-    resolved = [
-        record_and_resolve(task.title, task.priority, task.reason)
-        for task in result.tasks
-    ]
-    for task in resolved:
+    for task in result.tasks:
         background_tasks.add_task(
-            _upsert_task_background,
-            task["title"],
-            task["priority"],
-            task["reason"],
+            _record_and_upsert_task_background,
+            task.title,
+            task.priority,
+            task.reason,
+            "/chat",
         )
 
     completed = []
@@ -274,11 +317,15 @@ def chat(
         route="/chat",
         request_id=http_request.state.request_id,
         session_id=request.session_id,
-        tasks=len(resolved),
+        tasks=len(result.tasks),
         completed=len(completed),
         duration_ms=round((time.perf_counter() - started_at) * 1000, 1),
     )
-    return {"reply": result.reply, "tasks": resolved, "completed_tasks": completed}
+    return {
+        "reply": result.reply,
+        "tasks": result.tasks,
+        "completed_tasks": completed,
+    }
 
 
 class SpeechRequest(BaseModel):
@@ -365,14 +412,21 @@ async def converse(
     started_at = time.perf_counter()
     audio_bytes = await request.body()
     prefetch_started_at = time.perf_counter()
-    context_future = asyncio.get_event_loop().run_in_executor(
+    context_future = asyncio.get_running_loop().run_in_executor(
         None, prefetch_context, session_id
     )
     if len(audio_bytes) > MAX_AUDIO_BYTES:
         try:
             await context_future
-        except Exception:
-            pass
+        except Exception as exc:
+            obs.warning(
+                "converse context prefetch failed",
+                route="/converse",
+                request_id=request.state.request_id,
+                session_id=session_id,
+                detail=str(exc),
+                exc_type=type(exc).__name__,
+            )
         raise HTTPException(status_code=413, detail="audio payload too large")
     try:
         with span("stt"):
@@ -422,7 +476,20 @@ async def converse(
             media_type="application/x-ndjson",
         )
 
-    context = await context_future
+    try:
+        context = await context_future
+    except Exception as exc:
+        obs.warning(
+            "converse context prefetch failed",
+            route="/converse",
+            request_id=request.state.request_id,
+            session_id=session_id,
+            detail=str(exc),
+            exc_type=type(exc).__name__,
+        )
+        context = ContextBundle(
+            history=[], today_events=[], open_tasks=[], pending_questions=[]
+        )
     prefetch_ms = round((time.perf_counter() - prefetch_started_at) * 1000, 1)
 
     reply_parts: list[str] = []
@@ -500,8 +567,25 @@ async def converse(
                 sentences += 1
                 yield from sentence_audio_events(sentence)
             reply = "".join(reply_parts)
-            if reply and not enqueue_finalize_turn(session_id, user_text, reply):
-                background_tasks.add_task(finalize_turn, session_id, user_text, reply)
+            finalize_via = "skipped_empty_reply"
+            if reply:
+                if enqueue_finalize_turn(
+                    session_id,
+                    user_text,
+                    reply,
+                    request_id=request.state.request_id,
+                ):
+                    finalize_via = "cloud_tasks"
+                else:
+                    background_tasks.add_task(finalize_turn, session_id, user_text, reply)
+                    finalize_via = "background_fallback"
+            else:
+                obs.warning(
+                    "converse produced empty reply",
+                    route="/converse",
+                    request_id=request.state.request_id,
+                    session_id=session_id,
+                )
             yield _ndjson_event({"type": "done", "reply": reply})
             obs.info(
                 "converse request completed",
@@ -514,6 +598,7 @@ async def converse(
                 first_audio_ms=first_audio_ms,
                 total_ms=round((time.perf_counter() - started_at) * 1000, 1),
                 sentences=sentences,
+                finalize_via=finalize_via,
             )
         except Exception as exc:
             obs.error(
@@ -573,27 +658,57 @@ class AnswerRequest(BaseModel):
 @app.post("/tasks/{doc_id}/answer", dependencies=[Depends(require_app_token)])
 def post_answer(doc_id: str, request: AnswerRequest) -> dict:
     """ゆいからの質問にユーザーが回答し、タスクを前進させる。"""
-    return answer_question(doc_id, request.answer)
+    try:
+        return answer_question(doc_id, request.answer)
+    except Exception as exc:
+        obs.error(
+            "task action failed",
+            route="/tasks/{doc_id}/answer",
+            doc_id=doc_id,
+            detail=str(exc),
+            exc_type=type(exc).__name__,
+        )
+        raise HTTPException(status_code=500, detail="task action failed") from exc
 
 
 @app.post("/tasks/{doc_id}/complete", dependencies=[Depends(require_app_token)])
 def post_complete(doc_id: str) -> dict:
     """指定したタスクをFirestoreとGoogle Tasksの両方で完了にする。"""
-    task = complete_task(doc_id)
-    if "error" in task:
-        return task
-    google_task_id = complete_google_task(task["title"])
-    return {**task, "google_task_id": google_task_id}
+    try:
+        task = complete_task(doc_id)
+        if "error" in task:
+            return task
+        google_task_id = complete_google_task(task["title"])
+        return {**task, "google_task_id": google_task_id}
+    except Exception as exc:
+        obs.error(
+            "task action failed",
+            route="/tasks/{doc_id}/complete",
+            doc_id=doc_id,
+            detail=str(exc),
+            exc_type=type(exc).__name__,
+        )
+        raise HTTPException(status_code=500, detail="task action failed") from exc
 
 
 @app.delete("/tasks/{doc_id}", dependencies=[Depends(require_app_token)])
 def delete_task_endpoint(doc_id: str) -> dict:
     """誤って拾われたタスクをFirestoreとGoogle Tasksの両方から取り消す。"""
-    task = delete_task(doc_id)
-    if "error" in task:
-        return task
-    google_task_id = delete_google_task(task["title"])
-    return {**task, "google_task_id": google_task_id}
+    try:
+        task = delete_task(doc_id)
+        if "error" in task:
+            return task
+        google_task_id = delete_google_task(task["title"])
+        return {**task, "google_task_id": google_task_id}
+    except Exception as exc:
+        obs.error(
+            "task action failed",
+            route="/tasks/{doc_id}",
+            doc_id=doc_id,
+            detail=str(exc),
+            exc_type=type(exc).__name__,
+        )
+        raise HTTPException(status_code=500, detail="task action failed") from exc
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

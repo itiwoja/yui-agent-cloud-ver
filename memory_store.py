@@ -152,37 +152,19 @@ def record_and_resolve(title: str, priority: int, reason: str) -> dict:
     if previous:
         doc = previous[0]
         data = doc.to_dict()
-        mention_count = data.get("mention_count", 1) + 1
-        previous_priority = data.get("priority", priority)
-        # 再言及はユーザー由来なので上限は MAX（🔴 まで許す）。新規抽出側が
-        # より高い優先度を付けていればそれも尊重する。
-        new_priority = max(promote(previous_priority, PROMOTION_STEP), priority)
-        was_promoted = new_priority > priority
-
-        doc.reference.update(
-            {
-                "priority": new_priority,
-                "reason": reason,
-                "mention_count": mention_count,
-                "last_mentioned_at": now,
-            }
-        )
-
-        return {
-            "title": title,
-            "priority": new_priority,
-            "reason": reason,
-            "mention_count": mention_count,
-            "promoted": was_promoted,
-            "previous_priority": previous_priority,
-        }
+        return _resolve_remention(data, doc.reference, title, priority, reason, now)
 
     embedding = None
     if is_semantic_match_enabled():
         try:
             embedding = embed_text(title)
-        except Exception:
-            obs.warning("semantic matching failed", api="embeddings")
+        except Exception as exc:
+            obs.warning(
+                "semantic matching failed",
+                api="embeddings",
+                detail=str(exc),
+                exc_type=type(exc).__name__,
+            )
         else:
             for task in find_open_tasks():
                 task_embedding = task.get("embedding")
